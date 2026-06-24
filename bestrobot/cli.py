@@ -91,7 +91,7 @@ async def command_run(settings: Settings, db: Database, force_lock: bool) -> Non
     async with managed_locks(settings, ["panel", "engine"], force_lock):
         bot = await start_bot(settings)
         user = await start_user(settings)
-        panel = AdminPanel(bot, db, settings)
+        panel = AdminPanel(bot, db, settings, forward_client=user)
         panel.register()
         engine = ForwardEngine(user, db, settings)
         await engine.start()
@@ -108,13 +108,16 @@ async def command_run(settings: Settings, db: Database, force_lock: bool) -> Non
 async def command_panel(settings: Settings, db: Database, force_lock: bool) -> None:
     async with managed_locks(settings, ["panel"], force_lock):
         bot = await start_bot(settings)
-        panel = AdminPanel(bot, db, settings)
+        forward_client = await try_start_user(settings)
+        panel = AdminPanel(bot, db, settings, forward_client=forward_client)
         panel.register()
         print("پنل مدیریت روشن شد. برای توقف Ctrl+C بزن.")
         try:
             await wait_forever()
         finally:
             await bot.disconnect()
+            if forward_client:
+                await forward_client.disconnect()
             db.close()
 
 
@@ -163,6 +166,14 @@ async def start_user(settings: Settings) -> TelegramClient:
     me = await user.get_me()
     log.info("اکانت فوروارد وصل شد: %s", getattr(me, "username", me.id))
     return user
+
+
+async def try_start_user(settings: Settings) -> TelegramClient | None:
+    try:
+        return await start_user(settings)
+    except Exception as exc:
+        log.warning("اتصال اکانت فوروارد برای پنل برقرار نشد؛ گرفتن اسم واقعی کانال‌ها غیرفعال می‌ماند: %s", exc)
+        return None
 
 
 async def wait_forever() -> None:

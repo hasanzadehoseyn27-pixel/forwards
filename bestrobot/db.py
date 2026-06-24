@@ -177,10 +177,13 @@ class Database:
             return self.fetchall("SELECT * FROM entities WHERE kind=? ORDER BY id DESC", (kind,))
         return self.fetchall("SELECT * FROM entities ORDER BY kind, id DESC")
 
+    def update_entity_title(self, entity_id: int, title: str) -> None:
+        self.execute("UPDATE entities SET title=? WHERE id=?", (title.strip(), entity_id))
+
     def add_group(self, name: str) -> int:
         ts = now_ts()
         cur = self.execute(
-            "INSERT INTO forward_groups(name, created_at, updated_at) VALUES(?, ?, ?)",
+            "INSERT INTO forward_groups(name, enabled, created_at, updated_at) VALUES(?, 1, ?, ?)",
             (name.strip(), ts, ts),
         )
         group_id = int(cur.lastrowid)
@@ -192,6 +195,12 @@ class Database:
 
     def get_group(self, group_id: int) -> sqlite3.Row | None:
         return self.fetchone("SELECT * FROM forward_groups WHERE id=?", (group_id,))
+
+    def find_groups_by_name(self, name: str) -> list[sqlite3.Row]:
+        return self.fetchall(
+            "SELECT * FROM forward_groups WHERE name = ? COLLATE NOCASE ORDER BY id",
+            (name.strip(),),
+        )
 
     def update_group(self, group_id: int, **values: Any) -> None:
         allowed = {"name", "mode", "interval_seconds", "enabled"}
@@ -228,6 +237,9 @@ class Database:
                 "UPDATE group_health SET last_error=NULL, last_error_at=NULL, running_note=? WHERE group_id=?",
                 ("ریست شد؛ از پیام‌های جدید به بعد ادامه می‌دهد", group_id),
             )
+
+    def delete_group(self, group_id: int) -> None:
+        self.execute("DELETE FROM forward_groups WHERE id=?", (group_id,))
 
     def link_entity(self, group_id: int, entity_id: int, kind: str) -> None:
         table = "group_sources" if kind == "source" else "group_destinations"

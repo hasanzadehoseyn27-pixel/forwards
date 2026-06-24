@@ -23,14 +23,18 @@ CUSTOMERS = "👥 مشتری‌ها و اشتراک"
 STATUS = "📊 وضعیت کلی"
 ADD_SOURCE = "➕ افزودن مبدا"
 ADD_DESTINATION = "➕ افزودن مقصد"
+REFRESH_SOURCE_TITLES = "🔄 به‌روزرسانی نام مبداها"
+REFRESH_DESTINATION_TITLES = "🔄 به‌روزرسانی نام مقصدها"
 ADD_GROUP = "➕ ساخت گروه"
 ADD_CUSTOMER = "➕ افزودن مشتری"
 ADD_SUBSCRIPTION = "➕ افزودن اشتراک"
 TOGGLE_GROUP = "🔌 روشن/خاموش"
 RESET_GROUP = "🔄 ریست گروه"
+DELETE_GROUP = "🗑 حذف گروه"
+CONFIRM_DELETE_GROUP = "✅ بله، گروه حذف شود"
+CANCEL_DELETE_GROUP = "❌ نه، منصرف شدم"
 MODE_ONCE = "📨 حالت یک‌بار"
-MODE_REPEAT = "🔁 حالت تکراری"
-SET_INTERVAL = "⏳ تنظیم فاصله"
+MODE_REPEAT = "🔁 حالت دائمی"
 INTERVAL_SECONDS = "ثانیه‌ای"
 INTERVAL_MINUTES = "دقیقه‌ای"
 INTERVAL_HOURS = "ساعتی"
@@ -39,10 +43,11 @@ ADD_GROUP_DESTINATION = "📤 افزودن مقصد به گروه"
 
 
 class AdminPanel:
-    def __init__(self, bot: TelegramClient, db: Database, settings: Settings) -> None:
+    def __init__(self, bot: TelegramClient, db: Database, settings: Settings, forward_client: TelegramClient | None = None) -> None:
         self.bot = bot
         self.db = db
         self.settings = settings
+        self.forward_client = forward_client
 
     def register(self) -> None:
         self.bot.add_event_handler(self.on_start, events.NewMessage(pattern=r"^/start$"))
@@ -87,7 +92,13 @@ class AdminPanel:
                 await self.handle_add_entity(event, payload["kind"], text)
             elif name == "add_group":
                 group_id = self.db.add_group(text)
-                await event.respond(f"گروه «{text}» ساخته شد. شناسه: {group_id}", buttons=self.group_buttons(group_id))
+                self.db.set_panel_action(event.sender_id, "pick_entity_multi", {"group_id": group_id, "kind": "source", "page": 0, "wizard": "source"})
+                await event.respond(f"گروه «{text}» ساخته شد و به‌صورت پیش‌فرض روشن است. شناسه: {group_id}")
+                await event.respond(self.entity_picker_text(group_id, "source"), buttons=self.entity_picker_keyboard(group_id, "source", 0, "source"))
+                await event.respond(
+                    "اگر مبدای جدیدی داری که در این لیست نیست، یوزرنیمش را با @ بفرست تا اضافه و مستقیم به این گروه وصل شود.",
+                    buttons=self.cancel_buttons(),
+                )
             elif name == "set_interval":
                 group_id = int(payload["group_id"])
                 seconds = parse_duration(text)
@@ -106,21 +117,25 @@ class AdminPanel:
                 self.db.update_group(group_id, interval_seconds=seconds)
                 self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
                 await event.respond(f"فاصله تکرار روی {format_duration(seconds)} تنظیم شد.\n\n{self.group_text(group_id)}", buttons=self.group_buttons(group_id))
-            elif name == "stagger":
-                await self.handle_stagger(event, text)
+            elif name == "stagger_names":
+                await self.handle_stagger_names(event, text)
+            elif name == "stagger_gap":
+                await self.handle_stagger_gap(event, payload, text)
             elif name == "add_customer":
                 title, note = split_title_peer(text)
                 customer_id = self.db.add_customer(title, note)
                 await event.respond(f"مشتری ثبت شد. شناسه: {customer_id}", buttons=self.customer_buttons())
             elif name == "add_subscription":
                 await self.handle_subscription(event, text)
-            elif name == "pick_entity":
-                await self.handle_pick_entity(event, payload, text)
+            elif name == "pick_entity_multi":
+                await self.handle_pick_entity_multi(event, payload, text)
+            elif name == "confirm_delete_group":
+                await self.handle_confirm_delete_group(event, payload, text)
             else:
                 await event.respond("عملیات نامشخص بود. دوباره از منو انتخاب کن.", buttons=self.main_buttons())
         except Exception as exc:
             log.exception("خطای پنل در action=%s", name)
-            if name in {"set_interval", "set_interval_unit", "set_interval_value", "add_entity", "pick_entity"}:
+            if name in {"set_interval", "set_interval_unit", "set_interval_value", "add_entity", "pick_entity_multi", "stagger_names", "stagger_gap", "confirm_delete_group"}:
                 self.db.set_panel_action(event.sender_id, name, payload)
                 buttons = self.interval_unit_buttons() if name == "set_interval_unit" else self.cancel_buttons()
             else:
@@ -138,6 +153,49 @@ class AdminPanel:
             group_id = int(data.split(":", 1)[1])
             self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
             await event.respond(self.group_text(group_id), buttons=self.group_buttons(group_id))
+            return
+        if data.startswith("tg|"):
+            _, group_id_s, kind, entity_id_s, page_s, wizard_tag = data.split("|")
+            group_id, entity_id, page = int(group_id_s), int(entity_id_s), int(page_s)
+            wizard = None if wizard_tag == "-" else wizard_tag
+            linked = self.db.group_sources(group_id) if kind == "source" else self.db.group_destinations(group_id)
+            linked_ids = {int(row["id"]) for row in linked}
+            if entity_id in linked_ids:
+                self.db.unlink_entity(group_id, entity_id, kind)
+            else:
+                self.db.link_entity(group_id, entity_id, kind)
+            try:
+                await event.edit(self.entity_picker_text(group_id, kind), buttons=self.entity_picker_keyboard(group_id, kind, page, wizard))
+            except Exception:
+                log.exception("خطا در به‌روزرسانی چک‌باکس مبدا/مقصد")
+            return
+        if data.startswith("pg|"):
+            _, group_id_s, kind, page_s, wizard_tag = data.split("|")
+            group_id, page = int(group_id_s), int(page_s)
+            wizard = None if wizard_tag == "-" else wizard_tag
+            try:
+                await event.edit(self.entity_picker_text(group_id, kind), buttons=self.entity_picker_keyboard(group_id, kind, page, wizard))
+            except Exception:
+                log.exception("خطا در صفحه‌بندی لیست مبدا/مقصد")
+            return
+        if data.startswith("wnext|"):
+            _, group_id_s, step = data.split("|")
+            group_id = int(group_id_s)
+            if step == "destination":
+                self.db.set_panel_action(event.sender_id, "pick_entity_multi", {"group_id": group_id, "kind": "destination", "page": 0, "wizard": "destination"})
+                await event.respond(self.entity_picker_text(group_id, "destination"), buttons=self.entity_picker_keyboard(group_id, "destination", 0, "destination"))
+                await event.respond(
+                    "اگر مقصد جدیدی داری که در این لیست نیست، یوزرنیمش را با @ بفرست تا اضافه و مستقیم به این گروه وصل شود.",
+                    buttons=self.cancel_buttons(),
+                )
+                return
+            if step == "mode":
+                self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
+                await event.respond(
+                    "حالا حالت ارسال این گروه را انتخاب کن:\n📨 حالت یک‌بار: هر پیام فقط یک‌بار فوروارد می‌شود.\n🔁 حالت دائمی: پیام‌های امروز با فاصله‌ای که خودت تنظیم می‌کنی، دوباره فوروارد می‌شوند.",
+                    buttons=self.group_buttons(group_id),
+                )
+                return
             return
         await event.respond(self.main_text(), buttons=self.main_buttons())
 
@@ -157,6 +215,18 @@ class AdminPanel:
         if text == DESTINATIONS:
             self.db.pop_panel_action(event.sender_id)
             await event.respond(self.entities_text("destination"), buttons=self.entities_buttons("destination"))
+            return True
+        if text == REFRESH_SOURCE_TITLES:
+            self.db.pop_panel_action(event.sender_id)
+            updated = await self.refresh_entity_titles("source")
+            note = f"نام {updated} مبدا به‌روزرسانی شد." if self.forward_client else "اکانت فوروارد وصل نیست؛ نام واقعی گرفته نشد."
+            await event.respond(f"{note}\n\n{self.entities_text('source')}", buttons=self.entities_buttons("source"))
+            return True
+        if text == REFRESH_DESTINATION_TITLES:
+            self.db.pop_panel_action(event.sender_id)
+            updated = await self.refresh_entity_titles("destination")
+            note = f"نام {updated} مقصد به‌روزرسانی شد." if self.forward_client else "اکانت فوروارد وصل نیست؛ نام واقعی گرفته نشد."
+            await event.respond(f"{note}\n\n{self.entities_text('destination')}", buttons=self.entities_buttons("destination"))
             return True
         if text == ADD_SOURCE:
             self.db.set_panel_action(event.sender_id, "add_entity", {"kind": "source"})
@@ -187,9 +257,9 @@ class AdminPanel:
             await event.respond(self.group_text(group_id), buttons=self.group_buttons(group_id))
             return True
         if text == STAGGER:
-            self.db.set_panel_action(event.sender_id, "stagger")
+            self.db.set_panel_action(event.sender_id, "stagger_names")
             await event.respond(
-                "شناسه گروه‌ها و فاصله شروع را بفرست.\nنمونه: 1,2,3 | 2m\nگروه‌ها خاموش می‌شوند و با فاصله روشن می‌شوند.",
+                "اسم گروه‌ها را با کاما (,) جدا کن و بفرست.\nنمونه: تست 1, تست 2, تست 3\nاگر اسم گروهی تکراری بود، می‌توانی به‌جای اسم، شناسه‌اش را بفرستی.\nفاصله شروع را در مرحله بعد می‌پرسم. گروه‌ها خاموش می‌شوند و به ترتیب با فاصله روشن می‌شوند.",
                 buttons=self.cancel_buttons(),
             )
             return True
@@ -242,19 +312,32 @@ class AdminPanel:
         if text == MODE_REPEAT:
             self.db.update_group(group_id, mode="repeat")
             self.db.set_panel_action(event.sender_id, "set_interval_unit", {"group_id": group_id})
-            await event.respond("حالت تکراری فعال شد. واحد فاصله را انتخاب کن.", buttons=self.interval_unit_buttons())
-            return True
-        if text == SET_INTERVAL:
-            self.db.set_panel_action(event.sender_id, "set_interval_unit", {"group_id": group_id})
-            await event.respond("واحد فاصله را انتخاب کن.", buttons=self.interval_unit_buttons())
+            await event.respond("حالت دائمی فعال شد. واحد فاصله تکرار را انتخاب کن.", buttons=self.interval_unit_buttons())
             return True
         if text == ADD_GROUP_SOURCE:
-            self.db.set_panel_action(event.sender_id, "pick_entity", {"group_id": group_id, "kind": "source"})
-            await event.respond("یک مبدا را انتخاب کن یا @username جدید بفرست.", buttons=self.pick_entity_buttons(group_id, "source"))
+            self.db.set_panel_action(event.sender_id, "pick_entity_multi", {"group_id": group_id, "kind": "source", "page": 0})
+            await event.respond(self.entity_picker_text(group_id, "source"), buttons=self.entity_picker_keyboard(group_id, "source", 0))
+            await event.respond(
+                "اگر مبدای جدیدی داری که در این لیست نیست، یوزرنیمش را با @ بفرست تا اضافه و مستقیم به این گروه وصل شود.",
+                buttons=self.cancel_buttons(),
+            )
             return True
         if text == ADD_GROUP_DESTINATION:
-            self.db.set_panel_action(event.sender_id, "pick_entity", {"group_id": group_id, "kind": "destination"})
-            await event.respond("یک مقصد را انتخاب کن یا @username جدید بفرست.", buttons=self.pick_entity_buttons(group_id, "destination"))
+            self.db.set_panel_action(event.sender_id, "pick_entity_multi", {"group_id": group_id, "kind": "destination", "page": 0})
+            await event.respond(self.entity_picker_text(group_id, "destination"), buttons=self.entity_picker_keyboard(group_id, "destination", 0))
+            await event.respond(
+                "اگر مقصد جدیدی داری که در این لیست نیست، یوزرنیمش را با @ بفرست تا اضافه و مستقیم به این گروه وصل شود.",
+                buttons=self.cancel_buttons(),
+            )
+            return True
+        if text == DELETE_GROUP:
+            group = self.db.get_group(group_id)
+            name = str(group["name"]) if group else str(group_id)
+            self.db.set_panel_action(event.sender_id, "confirm_delete_group", {"group_id": group_id})
+            await event.respond(
+                f"مطمئنی گروه «{name}» حذف شود؟\nمبداها و مقصدهای وصل‌شده به این گروه و کل صف ارسالش هم حذف می‌شود. این کار قابل برگشت نیست.",
+                buttons=reply_keyboard([[CONFIRM_DELETE_GROUP], [CANCEL_DELETE_GROUP]]),
+            )
             return True
         return False
 
@@ -274,35 +357,114 @@ class AdminPanel:
     async def handle_add_entity(self, event, kind: str, text: str) -> None:
         title, peer = split_title_peer(text)
         peer = normalize_peer(peer)
+        real_title = await self.fetch_real_title(peer)
+        if real_title:
+            title = real_title
         entity_id = self.db.add_entity(kind, title, peer)
         label = "مبدا" if kind == "source" else "مقصد"
-        await event.respond(f"{label} ثبت شد.\nشناسه: {entity_id}\nآدرس: {peer}", buttons=self.entities_buttons(kind))
+        await event.respond(f"{label} ثبت شد.\nنام: {title}\nآدرس: {peer}", buttons=self.entities_buttons(kind))
 
-    async def handle_pick_entity(self, event, payload, text: str) -> None:
+    async def fetch_real_title(self, peer: str) -> str | None:
+        if not self.forward_client:
+            return None
+        try:
+            entity = await self.forward_client.get_entity(peer)
+        except Exception:
+            log.exception("نتوانستم اسم واقعی %s را از تلگرام بگیرم", peer)
+            return None
+        title = getattr(entity, "title", None)
+        if title and str(title).strip():
+            return str(title).strip()
+        first_name = getattr(entity, "first_name", None) or ""
+        last_name = getattr(entity, "last_name", None) or ""
+        full_name = f"{first_name} {last_name}".strip()
+        return full_name or None
+
+    async def refresh_entity_titles(self, kind: str) -> int:
+        if not self.forward_client:
+            return 0
+        updated = 0
+        for row in self.db.list_entities(kind):
+            real_title = await self.fetch_real_title(str(row["peer"]))
+            if real_title and real_title != str(row["title"]).strip():
+                self.db.update_entity_title(int(row["id"]), real_title)
+                updated += 1
+        return updated
+
+    async def handle_pick_entity_multi(self, event, payload, text: str) -> None:
         group_id = int(payload["group_id"])
         kind = payload["kind"]
-        entity_id = None
-        if text.startswith("📌 "):
-            entity_id = parse_first_int(text)
-        else:
-            title, peer = split_title_peer(text)
-            entity_id = self.db.add_entity(kind, title, normalize_peer(peer))
-
+        wizard = payload.get("wizard")
+        title, peer = split_title_peer(text)
+        peer = normalize_peer(peer)
+        real_title = await self.fetch_real_title(peer)
+        if real_title:
+            title = real_title
+        entity_id = self.db.add_entity(kind, title, peer)
         self.db.link_entity(group_id, int(entity_id), kind)
-        self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
-        await event.respond("اضافه شد.\n\n" + self.group_text(group_id), buttons=self.group_buttons(group_id))
-
-    async def handle_stagger(self, event, text: str) -> None:
-        if "|" not in text:
-            raise ValueError("فرمت درست: 1,2,3 | 2m")
-        ids_part, gap_part = text.split("|", 1)
-        group_ids = [int(part.strip()) for part in ids_part.split(",") if part.strip()]
-        gap_seconds = parse_duration(gap_part.strip())
-        if not group_ids:
-            raise ValueError("هیچ شناسه گروهی پیدا نشد.")
-        self.db.schedule_staggered_start(group_ids, gap_seconds)
+        new_payload = {"group_id": group_id, "kind": kind, "page": 0}
+        if wizard:
+            new_payload["wizard"] = wizard
+        self.db.set_panel_action(event.sender_id, "pick_entity_multi", new_payload)
+        label = "مبدا" if kind == "source" else "مقصد"
         await event.respond(
-            f"{len(group_ids)} گروه زمان‌بندی شد. فاصله شروع: {format_duration(gap_seconds)}",
+            f"{label} «{title}» اضافه و به گروه وصل شد.\n\n" + self.entity_picker_text(group_id, kind),
+            buttons=self.entity_picker_keyboard(group_id, kind, 0, wizard),
+        )
+
+    async def handle_confirm_delete_group(self, event, payload, text: str) -> None:
+        group_id = int(payload["group_id"])
+        group = self.db.get_group(group_id)
+        name = str(group["name"]) if group else str(group_id)
+        if text == CONFIRM_DELETE_GROUP:
+            self.db.delete_group(group_id)
+            await event.respond(f"گروه «{name}» حذف شد.", buttons=self.main_buttons())
+            return
+        self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
+        await event.respond("حذف لغو شد.\n\n" + self.group_text(group_id), buttons=self.group_buttons(group_id))
+
+    async def handle_stagger_names(self, event, text: str) -> None:
+        tokens = [part.strip() for part in text.split(",") if part.strip()]
+        if not tokens:
+            raise ValueError("حداقل اسم یا شناسه یک گروه لازم است.")
+
+        group_ids: list[int] = []
+        labels: list[str] = []
+        for token in tokens:
+            if token.isdigit():
+                group = self.db.get_group(int(token))
+                if not group:
+                    raise ValueError(f"گروهی با شناسه {token} پیدا نشد.")
+                group_ids.append(int(group["id"]))
+                labels.append(str(group["name"]))
+                continue
+
+            matches = self.db.find_groups_by_name(token)
+            if not matches:
+                raise ValueError(f"گروهی با اسم «{token}» پیدا نشد.")
+            if len(matches) > 1:
+                ids_text = "، ".join(str(row["id"]) for row in matches)
+                raise ValueError(f"چند گروه با اسم «{token}» وجود دارد. به‌جای اسم، یکی از این شناسه‌ها را بفرست: {ids_text}")
+            group_ids.append(int(matches[0]["id"]))
+            labels.append(str(matches[0]["name"]))
+
+        self.db.set_panel_action(event.sender_id, "stagger_gap", {"group_ids": group_ids, "labels": labels})
+        await event.respond(
+            "حالا فاصله شروع بین گروه‌ها را بفرست.\nنمونه: 2m یا 30s یا 1h",
+            buttons=self.cancel_buttons(),
+        )
+
+    async def handle_stagger_gap(self, event, payload, text: str) -> None:
+        group_ids = [int(value) for value in payload.get("group_ids", [])]
+        labels = payload.get("labels") or [str(value) for value in group_ids]
+        if not group_ids:
+            raise ValueError("گروهی برای زمان‌بندی انتخاب نشده بود. از اول شروع کن.")
+
+        gap_seconds = parse_duration(text)
+        self.db.schedule_staggered_start(group_ids, gap_seconds)
+        names_text = "، ".join(labels)
+        await event.respond(
+            f"{len(group_ids)} گروه زمان‌بندی شد ({names_text}).\nفاصله شروع: {format_duration(gap_seconds)}",
             buttons=self.main_buttons(),
         )
 
@@ -325,6 +487,7 @@ class AdminPanel:
                 [SOURCES, DESTINATIONS],
                 [GROUPS, STAGGER],
                 [CUSTOMERS, STATUS],
+                [HOME],
             ]
         )
 
@@ -339,12 +502,13 @@ class AdminPanel:
         lines = [label]
         for row in rows:
             state = "فعال" if row["enabled"] else "خاموش"
-            lines.append(f"{row['id']}. {row['peer']} ({state})")
+            lines.append(f"- {display_entity_label(row)} - {state}")
         return "\n".join(lines)
 
     def entities_buttons(self, kind: str):
         add_label = ADD_SOURCE if kind == "source" else ADD_DESTINATION
-        return reply_keyboard([[add_label], [HOME, BACK]])
+        refresh_label = REFRESH_SOURCE_TITLES if kind == "source" else REFRESH_DESTINATION_TITLES
+        return reply_keyboard([[add_label], [refresh_label], [HOME, BACK]])
 
     def groups_text(self) -> str:
         groups = self.db.list_groups()
@@ -353,8 +517,8 @@ class AdminPanel:
         lines = ["گروه‌های فوروارد"]
         for group in groups:
             state = "روشن" if group["enabled"] else "خاموش"
-            mode = "یک‌بار" if group["mode"] == "once" else "تکراری"
-            lines.append(f"{group['id']}. {group['name']} - {state} - {mode} - {format_duration(group['interval_seconds'])}")
+            mode = "یک‌بار" if group["mode"] == "once" else "دائمی"
+            lines.append(f"- {group['name']} - {state} - {mode} - {format_duration(group['interval_seconds'])}")
         return "\n".join(lines)
 
     def groups_buttons(self):
@@ -374,26 +538,17 @@ class AdminPanel:
         group = status["group"]
         if not group:
             return "گروه پیدا نشد."
-        health = status["health"]
         state = "روشن" if group["enabled"] else "خاموش"
-        mode = "ارسال یک‌بار" if group["mode"] == "once" else "ارسال تکراری"
-        sources = "\n".join(f"- {row['peer']}" for row in status["sources"]) or "-"
-        destinations = "\n".join(f"- {row['peer']}" for row in status["destinations"]) or "-"
-        jobs = status["jobs"]
-        last_ok = format_ts(health.get("last_success_at"))
-        last_err = format_ts(health.get("last_error_at"))
+        mode = "ارسال یک‌بار" if group["mode"] == "once" else "ارسال دائمی"
+        sources = "\n".join(f"- {display_entity_label(row)}" for row in status["sources"]) or "-"
+        destinations = "\n".join(f"- {display_entity_label(row)}" for row in status["destinations"]) or "-"
         return (
             f"گروه {group['id']} - {group['name']}\n"
             f"وضعیت: {state}\n"
             f"حالت: {mode}\n"
             f"فاصله: {format_duration(group['interval_seconds'])}\n"
             f"\nمبداها:\n{sources}\n"
-            f"\nمقصدها:\n{destinations}\n"
-            f"\nصف: pending={jobs.get('pending', 0)} running={jobs.get('running', 0)} done={jobs.get('done', 0)} failed={jobs.get('failed', 0)}\n"
-            f"آخرین موفق: {last_ok}\n"
-            f"آخرین خطا: {last_err}\n"
-            f"خطا: {health.get('last_error') or '-'}\n"
-            f"یادداشت: {health.get('running_note') or '-'}"
+            f"\nمقصدها:\n{destinations}"
         )
 
     def group_buttons(self, group_id: int):
@@ -401,9 +556,9 @@ class AdminPanel:
             [
                 [TOGGLE_GROUP, RESET_GROUP],
                 [MODE_ONCE, MODE_REPEAT],
-                [SET_INTERVAL],
                 [ADD_GROUP_SOURCE],
                 [ADD_GROUP_DESTINATION],
+                [DELETE_GROUP],
                 [GROUPS, HOME],
             ]
         )
@@ -411,12 +566,45 @@ class AdminPanel:
     def interval_unit_buttons(self):
         return reply_keyboard([[INTERVAL_SECONDS, INTERVAL_MINUTES, INTERVAL_HOURS], [HOME, BACK]])
 
-    def pick_entity_buttons(self, group_id: int, kind: str):
+    def entity_picker_text(self, group_id: int, kind: str) -> str:
+        label = "مبداها" if kind == "source" else "مقصدها"
+        return f"روی هرکدام از {label} بزن تا به این گروه اضافه یا از آن حذف شود.\nوقتی تمام شد «✅ اتمام و بازگشت به گروه» را بزن."
+
+    def entity_picker_keyboard(self, group_id: int, kind: str, page: int, wizard: str | None = None):
+        all_rows = self.db.list_entities(kind)
+        linked = self.db.group_sources(group_id) if kind == "source" else self.db.group_destinations(group_id)
+        linked_ids = {int(row["id"]) for row in linked}
+        page_size = 10
+        total_pages = max(1, (len(all_rows) + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+        start = page * page_size
+        page_items = all_rows[start:start + page_size]
+        wizard_tag = wizard or "-"
+
         rows = []
-        for row in self.db.list_entities(kind):
-            rows.append([f"📌 {row['id']} - {row['peer']}"])
-        rows.append([GROUPS, HOME])
-        return reply_keyboard(rows)
+        if not page_items:
+            rows.append([Button.inline("هنوز چیزی ثبت نشده", b"noop")])
+        for row in page_items:
+            entity_id = int(row["id"])
+            checked = "☑️" if entity_id in linked_ids else "⬜"
+            label = f"{checked} {display_entity_label(row)}"
+            rows.append([Button.inline(label, f"tg|{group_id}|{kind}|{entity_id}|{page}|{wizard_tag}".encode())])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(Button.inline("« قبلی", f"pg|{group_id}|{kind}|{page - 1}|{wizard_tag}".encode()))
+        if page < total_pages - 1:
+            nav_row.append(Button.inline("بعدی »", f"pg|{group_id}|{kind}|{page + 1}|{wizard_tag}".encode()))
+        if nav_row:
+            rows.append(nav_row)
+
+        if wizard == "source":
+            rows.append([Button.inline("✅ ادامه: انتخاب مقصدها", f"wnext|{group_id}|destination".encode())])
+        elif wizard == "destination":
+            rows.append([Button.inline("✅ ادامه: تنظیم حالت ارسال", f"wnext|{group_id}|mode".encode())])
+        else:
+            rows.append([Button.inline("✅ اتمام و بازگشت به گروه", f"open_group:{group_id}".encode())])
+        return rows
 
     def customers_text(self) -> str:
         customers = self.db.list_customers()
@@ -462,13 +650,27 @@ def reply_keyboard(rows: list[list[str]]):
 def split_title_peer(text: str) -> tuple[str, str]:
     if "|" in text:
         title, peer = text.split("|", 1)
-        return title.strip(), peer.strip()
+        peer = normalize_peer(peer.strip())
+        title = title.strip() or peer
+        return title, peer
 
     peer = extract_peer(text)
     if peer:
-        title = text.replace(peer, "").strip(" -|،,:")
-        return title or peer, peer
+        return peer, peer
     return text.strip(), text.strip()
+
+
+def display_entity_label(row) -> str:
+    title = str(row["title"]).strip()
+    peer = str(row["peer"]).strip()
+    normalized_peer = peer.lstrip("@").rstrip("/").lower()
+    normalized_title = title.lstrip("@").rstrip("/").lower()
+    if normalized_title == normalized_peer:
+        return peer
+    title_as_peer = extract_peer(title)
+    if title_as_peer and title_as_peer.lstrip("@").lower() == normalized_peer:
+        return peer
+    return f"{title} ({peer})"
 
 
 def extract_peer(text: str) -> str | None:
