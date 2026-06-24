@@ -68,16 +68,7 @@ class ForwardEngine:
         try:
             last_id = self.db.get_last_message_id(group_id, source_id)
             if last_id <= 0:
-                latest = await self.client.get_messages(peer, limit=1)
-                if latest:
-                    message = latest[0]
-                    message_id = int(message.id)
-                    date_text = self._message_date_text(message.date)
-                    self.db.remember_message(group_id, source_id, message_id, date_text)
-                    cycle_key = "once" if group["mode"] == "once" else "initial"
-                    self.db.enqueue_message(group_id, source_id, message_id, cycle_key)
-                    self.db.set_last_message_id(group_id, source_id, message_id)
-                    log.info("گروه %s / مبدا %s از پیام %s به بعد شروع می‌شود.", group_id, peer, latest[0].id)
+                await self.enqueue_todays_messages(group, source)
                 return
 
             max_seen = last_id
@@ -100,6 +91,43 @@ class ForwardEngine:
         except Exception as exc:
             self.db.mark_error(group_id, f"خطا در خواندن مبدا {peer}: {exc}")
             log.exception("خطا در خواندن مبدا %s", peer)
+
+    async def enqueue_todays_messages(self, group, source, day_message_limit: int = 200) -> None:
+        group_id = int(group["id"])
+        source_id = int(source["id"])
+        peer = str(source["peer"])
+        today = datetime.now().date()
+        cycle_key = "once" if group["mode"] == "once" else "initial"
+
+        collected = []
+        async for message in self.client.iter_messages(peer, limit=day_message_limit):
+            if not message or not message.id:
+                continue
+            if self._local_date(message.date) != today:
+                break
+            collected.append(message)
+
+        if not collected:
+            latest = await self.client.get_messages(peer, limit=1)
+            if latest:
+                message = latest[0]
+                message_id = int(message.id)
+                date_text = self._message_date_text(message.date)
+                self.db.remember_message(group_id, source_id, message_id, date_text)
+                self.db.set_last_message_id(group_id, source_id, message_id)
+                log.info("گروه %s / مبدا %s امروز پستی نداشت؛ از پیام %s به بعد ادامه می‌شود.", group_id, peer, message_id)
+            return
+
+        max_seen = 0
+        for message in reversed(collected):
+            message_id = int(message.id)
+            date_text = self._message_date_text(message.date)
+            self.db.remember_message(group_id, source_id, message_id, date_text)
+            self.db.enqueue_message(group_id, source_id, message_id, cycle_key)
+            max_seen = max(max_seen, message_id)
+
+        self.db.set_last_message_id(group_id, source_id, max_seen)
+        log.info("گروه %s / مبدا %s: %s آگهی امروز وارد صف شد.", group_id, peer, len(collected))
 
     async def repeat_scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -216,3 +244,11 @@ class ForwardEngine:
             return value.astimezone().isoformat(timespec="seconds")
         except Exception:
             return value.isoformat(timespec="seconds")
+
+    def _local_date(self, value):
+        if value is None:
+            return datetime.now().date()
+        try:
+            return value.astimezone().date()
+        except Exception:
+            return value.date()
