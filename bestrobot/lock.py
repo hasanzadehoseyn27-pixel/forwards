@@ -21,9 +21,12 @@ class AppLock:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 heartbeat = float(data.get("heartbeat", 0))
+                owner_pid = int(data.get("pid", 0))
             except Exception:
                 heartbeat = 0
-            if now - heartbeat < self.stale_seconds:
+                owner_pid = 0
+            still_running = _is_pid_running(owner_pid)
+            if still_running and now - heartbeat < self.stale_seconds:
                 raise RuntimeError("یک نمونه دیگر از برنامه هنوز فعال به نظر می‌رسد. اگر مطمئن هستی مرده، چند دقیقه بعد اجرا کن یا --force-lock بده.")
         self._write()
 
@@ -53,3 +56,24 @@ class AppLock:
             self.path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    except Exception:
+        return True
+    return True

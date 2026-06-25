@@ -29,7 +29,6 @@ ADD_GROUP = "➕ ساخت گروه"
 ADD_CUSTOMER = "➕ افزودن مشتری"
 ADD_SUBSCRIPTION = "➕ افزودن اشتراک"
 TOGGLE_GROUP = "🔌 روشن/خاموش"
-RESET_GROUP = "🔄 ریست گروه"
 DELETE_GROUP = "🗑 حذف گروه"
 CONFIRM_DELETE_GROUP = "✅ بله، گروه حذف شود"
 CANCEL_DELETE_GROUP = "❌ نه، منصرف شدم"
@@ -299,11 +298,6 @@ class AdminPanel:
             self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
             await event.respond(f"گروه {state} شد.\n\n{self.group_text(group_id)}", buttons=self.group_buttons(group_id))
             return True
-        if text == RESET_GROUP:
-            self.db.reset_group(group_id)
-            self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
-            await event.respond("گروه ریست شد. از پیام‌های جدید به بعد ادامه می‌دهد.", buttons=self.group_buttons(group_id))
-            return True
         if text == MODE_ONCE:
             self.db.update_group(group_id, mode="once")
             self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
@@ -554,7 +548,7 @@ class AdminPanel:
     def group_buttons(self, group_id: int):
         return reply_keyboard(
             [
-                [TOGGLE_GROUP, RESET_GROUP],
+                [TOGGLE_GROUP],
                 [MODE_ONCE, MODE_REPEAT],
                 [ADD_GROUP_SOURCE],
                 [ADD_GROUP_DESTINATION],

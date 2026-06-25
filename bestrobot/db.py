@@ -228,16 +228,6 @@ class Database:
             self.execute("UPDATE group_health SET running_note=? WHERE group_id=?", ("خاموش شد", group_id))
         return bool(enabled)
 
-    def reset_group(self, group_id: int) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM group_source_state WHERE group_id=?", (group_id,))
-            self.conn.execute("DELETE FROM message_cache WHERE group_id=?", (group_id,))
-            self.conn.execute("DELETE FROM send_jobs WHERE group_id=? AND status IN ('pending','running')", (group_id,))
-            self.conn.execute(
-                "UPDATE group_health SET last_error=NULL, last_error_at=NULL, running_note=? WHERE group_id=?",
-                ("ریست شد؛ از پیام‌های جدید به بعد ادامه می‌دهد", group_id),
-            )
-
     def delete_group(self, group_id: int) -> None:
         self.execute("DELETE FROM forward_groups WHERE id=?", (group_id,))
 

@@ -77,6 +77,8 @@ class Settings:
     min_send_delay_seconds: float
     max_job_attempts: int
     lock_stale_seconds: int
+    watchdog_interval_seconds: int
+    watchdog_timeout_seconds: int
     proxy_type: str | None
     proxy_host: str | None
     proxy_port: int | None
@@ -94,7 +96,7 @@ class Settings:
         missing = [name for name in ("API_ID", "API_HASH", "BOT_TOKEN") if not os.getenv(name)]
         if missing:
             joined = ", ".join(missing)
-            raise RuntimeError(f"ØªÙ†Ø¸ÛŒÙ…Ø§Øª Ù†Ø§Ù‚Øµ Ø§Ø³Øª. Ø§ÛŒÙ† Ù…Ù‚Ø¯Ø§Ø±Ù‡Ø§ Ø¯Ø± .env Ù†ÛŒØ³ØªÙ†Ø¯: {joined}")
+            raise RuntimeError(f"تنظیمات ناقص است. این مقدارها در .env نیستند: {joined}")
 
         instance = os.getenv("INSTANCE_NAME", "bestrobot").strip() or "bestrobot"
         return cls(
@@ -115,6 +117,8 @@ class Settings:
             min_send_delay_seconds=_float("MIN_SEND_DELAY_SECONDS", 1.5),
             max_job_attempts=_int("MAX_JOB_ATTEMPTS", 5),
             lock_stale_seconds=_int("LOCK_STALE_SECONDS", 120),
+            watchdog_interval_seconds=_int("WATCHDOG_INTERVAL_SECONDS", 180),
+            watchdog_timeout_seconds=_int("WATCHDOG_TIMEOUT_SECONDS", 30),
             proxy_type=_optional("PROXY_TYPE"),
             proxy_host=_optional("PROXY_HOST"),
             proxy_port=_int("PROXY_PORT", 0) or None,
@@ -151,4 +155,3 @@ class Settings:
                 self.proxy_password,
             )
         return (mapping[proxy_type], self.proxy_host, self.proxy_port)
-

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 
 from telethon import TelegramClient
@@ -31,6 +32,7 @@ class ForwardEngine:
             asyncio.create_task(self.scan_sources_loop(), name="scan-sources"),
             asyncio.create_task(self.repeat_scheduler_loop(), name="repeat-scheduler"),
             asyncio.create_task(self.scheduled_starts_loop(), name="scheduled-starts"),
+            asyncio.create_task(self.watchdog_loop(), name="watchdog"),
         ]
         for index in range(self.settings.worker_count):
             self.tasks.append(asyncio.create_task(self.worker_loop(f"worker-{index + 1}"), name=f"worker-{index + 1}"))
@@ -65,6 +67,7 @@ class ForwardEngine:
         group_id = int(group["id"])
         source_id = int(source["id"])
         peer = str(source["peer"])
+        today = datetime.now().date()
         try:
             last_id = self.db.get_last_message_id(group_id, source_id)
             if last_id <= 0:
@@ -76,6 +79,16 @@ class ForwardEngine:
                 if not message or not message.id:
                     continue
                 max_seen = max(max_seen, int(message.id))
+                if self._local_date(message.date) != today:
+                    log.info(
+                        "پیام %s از %s مال قبل از امروز است؛ فوروارد نمی‌شود و دیگر هم بررسی نمی‌شود.",
+                        message.id,
+                        peer,
+                    )
+                    continue
+                if self._is_sticker(message):
+                    log.info("پیام %s از %s استیکر است؛ فوروارد نمی‌شود.", message.id, peer)
+                    continue
                 date_text = self._message_date_text(message.date)
                 self.db.remember_message(group_id, source_id, int(message.id), date_text)
                 cycle_key = "once" if group["mode"] == "once" else "initial"
@@ -100,14 +113,28 @@ class ForwardEngine:
         cycle_key = "once" if group["mode"] == "once" else "initial"
 
         collected = []
+        highest_seen_id = 0
         async for message in self.client.iter_messages(peer, limit=day_message_limit):
             if not message or not message.id:
                 continue
             if self._local_date(message.date) != today:
                 break
+            highest_seen_id = max(highest_seen_id, int(message.id))
+            if self._is_sticker(message):
+                log.info("پیام %s از %s استیکر است؛ فوروارد نمی‌شود.", message.id, peer)
+                continue
             collected.append(message)
 
         if not collected:
+            if highest_seen_id:
+                self.db.set_last_message_id(group_id, source_id, highest_seen_id)
+                log.info(
+                    "گروه %s / مبدا %s امروز فقط استیکر داشت؛ از پیام %s به بعد ادامه می‌شود.",
+                    group_id,
+                    peer,
+                    highest_seen_id,
+                )
+                return
             latest = await self.client.get_messages(peer, limit=1)
             if latest:
                 message = latest[0]
@@ -118,7 +145,7 @@ class ForwardEngine:
                 log.info("گروه %s / مبدا %s امروز پستی نداشت؛ از پیام %s به بعد ادامه می‌شود.", group_id, peer, message_id)
             return
 
-        max_seen = 0
+        max_seen = highest_seen_id
         for message in reversed(collected):
             message_id = int(message.id)
             date_text = self._message_date_text(message.date)
@@ -165,6 +192,25 @@ class ForwardEngine:
             except Exception:
                 log.exception("خطا در روشن‌کردن زمان‌بندی‌شده گروه‌ها")
             await asyncio.sleep(5)
+
+    async def watchdog_loop(self) -> None:
+        """هر چند دقیقه چک می‌کند کلاینت تلگرام واقعاً پاسخگوست یا فقط ظاهراً وصل است.
+        اگر پاسخ نگرفت، عمداً کل پروسه را می‌بندد تا PM2 آن را تمیز دوباره بالا بیاورد،
+        چون تلاش برای ریکانکت دستی توی همین پروسه گاهی به‌خاطر هنگ‌کردن واقعی شبکه جواب نمی‌دهد."""
+        while not self.stop_event.is_set():
+            await asyncio.sleep(self.settings.watchdog_interval_seconds)
+            if self.stop_event.is_set():
+                return
+            try:
+                await asyncio.wait_for(self.client.get_me(), timeout=self.settings.watchdog_timeout_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error(
+                    "نگهبان: کلاینت تلگرام به موقع پاسخ نداد (%s). برای ریست تمیز، پروسه الان بسته می‌شود تا PM2 دوباره بالا بیاوردش.",
+                    exc,
+                )
+                os._exit(1)
 
     async def worker_loop(self, worker_name: str) -> None:
         while not self.stop_event.is_set():
@@ -252,3 +298,9 @@ class ForwardEngine:
             return value.astimezone().date()
         except Exception:
             return value.date()
+
+    def _is_sticker(self, message) -> bool:
+        try:
+            return message.sticker is not None
+        except Exception:
+            return False
