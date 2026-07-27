@@ -552,7 +552,7 @@ class AdminPanel:
         total = len(self.db.list_entities(kind))
         if not total:
             return f"{label}\nهنوز چیزی ثبت نشده."
-        return f"{label} (مجموع {total})\nروی هرکدام بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
+        return f"{label} (مجموع {total})\nروی نام هرکدام بزن تا خودِ کانال/گروه در تلگرام باز شود و بررسی کنی؛ اگر مطمئن بودی، دکمه‌ی 🗑 زیرش را بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
 
     def entities_list_keyboard(self, kind: str, page: int):
         all_rows = self.db.list_entities(kind)
@@ -568,8 +568,14 @@ class AdminPanel:
         for row in page_items:
             entity_id = int(row["id"])
             state = "✅" if row["enabled"] else "⛔"
-            label = f"{state} {display_entity_label(row)}  🗑"
-            rows.append([Button.inline(label, f"eldel|{kind}|{entity_id}|{page}".encode())])
+            label = f"{state} {display_entity_label(row)}"
+            peer = str(row["peer"]).strip()
+            username = peer.lstrip("@").strip()
+            if username and "/" not in username and username.replace("_", "").isalnum():
+                rows.append([Button.url(label, f"https://t.me/{username}")])
+            else:
+                rows.append([Button.inline(label, b"noop")])
+            rows.append([Button.inline(f"🗑 حذف {display_entity_label(row)}", f"eldel|{kind}|{entity_id}|{page}".encode())])
 
         nav_row = []
         if page > 0:
