@@ -552,7 +552,7 @@ class AdminPanel:
         total = len(self.db.list_entities(kind))
         if not total:
             return f"{label}\nهنوز چیزی ثبت نشده."
-        return f"{label} (مجموع {total})\nروی 🗑 بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
+        return f"{label} (مجموع {total})\nروی هرکدام بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
 
     def entities_list_keyboard(self, kind: str, page: int):
         all_rows = self.db.list_entities(kind)
@@ -567,14 +567,9 @@ class AdminPanel:
             rows.append([Button.inline("هنوز چیزی ثبت نشده", b"noop")])
         for row in page_items:
             entity_id = int(row["id"])
-            state = "فعال" if row["enabled"] else "خاموش"
-            label = f"{display_entity_label(row)} ({state})"
-            rows.append(
-                [
-                    Button.inline(label, b"noop"),
-                    Button.inline("🗑", f"eldel|{kind}|{entity_id}|{page}".encode()),
-                ]
-            )
+            state = "✅" if row["enabled"] else "⛔"
+            label = f"{state} {display_entity_label(row)}  🗑"
+            rows.append([Button.inline(label, f"eldel|{kind}|{entity_id}|{page}".encode())])
 
         nav_row = []
         if page > 0:
