@@ -575,7 +575,7 @@ class AdminPanel:
                 link_button = Button.url(label, f"https://t.me/{username}")
             else:
                 link_button = Button.inline(label, b"noop")
-            rows.append([link_button, Button.inline("🗑", f"eldel|{kind}|{entity_id}|{page}".encode())])
+            rows.append([link_button, Button.inline("✕", f"eldel|{kind}|{entity_id}|{page}".encode())])
 
         nav_row = []
         if page > 0:
