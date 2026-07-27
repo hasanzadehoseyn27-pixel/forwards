@@ -23,6 +23,7 @@ class ForwardEngine:
         self.stop_event = asyncio.Event()
         self.send_semaphore = asyncio.Semaphore(settings.max_parallel_sends)
         self.tasks: list[asyncio.Task[None]] = []
+        self._group_flood_until: dict[int, int] = {}
 
     async def start(self) -> None:
         recovered = self.db.recover_running_jobs()
@@ -224,6 +225,18 @@ class ForwardEngine:
 
     async def send_job(self, job) -> None:
         group_id = int(job["group_id"])
+
+        blocked_until = self._group_flood_until.get(group_id)
+        if blocked_until and now_ts() < blocked_until:
+            self.db.finish_job(
+                int(job["id"]),
+                ok=False,
+                error="گروه هنوز در محدودیت FloodWait قبلی است؛ ارسال عقب افتاد",
+                run_after=blocked_until,
+                max_attempts=999999,
+            )
+            return
+
         group = self.db.get_group(group_id)
         if not group or not group["enabled"]:
             self.db.finish_job(
@@ -256,6 +269,7 @@ class ForwardEngine:
             )
         except FloodWaitError as exc:
             wait_seconds = int(getattr(exc, "seconds", 60)) + 5
+            self._group_flood_until[group_id] = now_ts() + wait_seconds
             self.db.finish_job(
                 int(job["id"]),
                 ok=False,
