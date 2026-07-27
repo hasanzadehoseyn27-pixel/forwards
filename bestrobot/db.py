@@ -183,6 +183,9 @@ class Database:
     def disable_entity(self, entity_id: int) -> None:
         self.execute("UPDATE entities SET enabled=0 WHERE id=?", (entity_id,))
 
+    def delete_entity(self, entity_id: int) -> None:
+        self.execute("DELETE FROM entities WHERE id=?", (entity_id,))
+
     def add_group(self, name: str) -> int:
         ts = now_ts()
         cur = self.execute(

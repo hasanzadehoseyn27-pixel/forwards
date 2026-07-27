@@ -196,6 +196,37 @@ class AdminPanel:
                 )
                 return
             return
+        if data.startswith("elpg|"):
+            _, kind, page_s = data.split("|")
+            page = int(page_s)
+            try:
+                await event.edit(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
+            except Exception:
+                log.exception("خطا در صفحه‌بندی لیست مبدا/مقصد")
+            return
+        if data.startswith("eldel|"):
+            _, kind, entity_id_s, page_s = data.split("|")
+            entity_id, page = int(entity_id_s), int(page_s)
+            row = self.db.fetchone("SELECT * FROM entities WHERE id=?", (entity_id,))
+            name = display_entity_label(row) if row else str(entity_id)
+            label = "مبدا" if kind == "source" else "مقصد"
+            await event.respond(
+                f"مطمئنی {label} «{name}» کامل حذف شود؟\nاز همه‌ی گروه‌ها هم جدا می‌شود و صف ارسال مربوطه هم پاک می‌شود. این کار قابل برگشت نیست.",
+                buttons=[
+                    [Button.inline("✅ بله، حذف کن", f"eldelok|{kind}|{entity_id}|{page}".encode())],
+                    [Button.inline("❌ نه", f"elpg|{kind}|{page}".encode())],
+                ],
+            )
+            return
+        if data.startswith("eldelok|"):
+            _, kind, entity_id_s, page_s = data.split("|")
+            entity_id, page = int(entity_id_s), int(page_s)
+            self.db.delete_entity(entity_id)
+            try:
+                await event.edit(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
+            except Exception:
+                await event.respond(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
+            return
         await event.respond(self.main_text(), buttons=self.main_buttons())
 
     async def handle_navigation(self, event, text: str) -> bool:
@@ -209,23 +240,27 @@ class AdminPanel:
             return True
         if text == SOURCES:
             self.db.pop_panel_action(event.sender_id)
-            await event.respond(self.entities_text("source"), buttons=self.entities_buttons("source"))
+            await event.respond("مدیریت مبداها:", buttons=self.entities_buttons("source"))
+            await event.respond(self.entities_list_text("source", 0), buttons=self.entities_list_keyboard("source", 0))
             return True
         if text == DESTINATIONS:
             self.db.pop_panel_action(event.sender_id)
-            await event.respond(self.entities_text("destination"), buttons=self.entities_buttons("destination"))
+            await event.respond("مدیریت مقصدها:", buttons=self.entities_buttons("destination"))
+            await event.respond(self.entities_list_text("destination", 0), buttons=self.entities_list_keyboard("destination", 0))
             return True
         if text == REFRESH_SOURCE_TITLES:
             self.db.pop_panel_action(event.sender_id)
             updated = await self.refresh_entity_titles("source")
             note = f"نام {updated} مبدا به‌روزرسانی شد." if self.forward_client else "اکانت فوروارد وصل نیست؛ نام واقعی گرفته نشد."
-            await event.respond(f"{note}\n\n{self.entities_text('source')}", buttons=self.entities_buttons("source"))
+            await event.respond(note, buttons=self.entities_buttons("source"))
+            await event.respond(self.entities_list_text("source", 0), buttons=self.entities_list_keyboard("source", 0))
             return True
         if text == REFRESH_DESTINATION_TITLES:
             self.db.pop_panel_action(event.sender_id)
             updated = await self.refresh_entity_titles("destination")
             note = f"نام {updated} مقصد به‌روزرسانی شد." if self.forward_client else "اکانت فوروارد وصل نیست؛ نام واقعی گرفته نشد."
-            await event.respond(f"{note}\n\n{self.entities_text('destination')}", buttons=self.entities_buttons("destination"))
+            await event.respond(note, buttons=self.entities_buttons("destination"))
+            await event.respond(self.entities_list_text("destination", 0), buttons=self.entities_list_keyboard("destination", 0))
             return True
         if text == ADD_SOURCE:
             self.db.set_panel_action(event.sender_id, "add_entity", {"kind": "source"})
@@ -503,6 +538,44 @@ class AdminPanel:
         add_label = ADD_SOURCE if kind == "source" else ADD_DESTINATION
         refresh_label = REFRESH_SOURCE_TITLES if kind == "source" else REFRESH_DESTINATION_TITLES
         return reply_keyboard([[add_label], [refresh_label], [HOME, BACK]])
+
+    def entities_list_text(self, kind: str, page: int) -> str:
+        label = "مبداها" if kind == "source" else "مقصدها"
+        total = len(self.db.list_entities(kind))
+        if not total:
+            return f"{label}\nهنوز چیزی ثبت نشده."
+        return f"{label} (مجموع {total})\nروی 🗑 بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
+
+    def entities_list_keyboard(self, kind: str, page: int):
+        all_rows = self.db.list_entities(kind)
+        page_size = 10
+        total_pages = max(1, (len(all_rows) + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+        start = page * page_size
+        page_items = all_rows[start:start + page_size]
+
+        rows = []
+        if not page_items:
+            rows.append([Button.inline("هنوز چیزی ثبت نشده", b"noop")])
+        for row in page_items:
+            entity_id = int(row["id"])
+            state = "فعال" if row["enabled"] else "خاموش"
+            label = f"{display_entity_label(row)} ({state})"
+            rows.append(
+                [
+                    Button.inline(label, b"noop"),
+                    Button.inline("🗑", f"eldel|{kind}|{entity_id}|{page}".encode()),
+                ]
+            )
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(Button.inline("« قبلی", f"elpg|{kind}|{page - 1}".encode()))
+        nav_row.append(Button.inline(f"صفحه {page + 1}/{total_pages}", b"noop"))
+        if page < total_pages - 1:
+            nav_row.append(Button.inline("بعدی »", f"elpg|{kind}|{page + 1}".encode()))
+        rows.append(nav_row)
+        return rows
 
     def groups_text(self) -> str:
         groups = self.db.list_groups()
