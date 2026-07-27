@@ -113,6 +113,14 @@ class AdminPanel:
                 group_id = int(payload["group_id"])
                 unit = payload["unit"]
                 seconds = interval_to_seconds(text, unit)
+                min_seconds = self.settings.repeat_scan_seconds
+                if seconds < min_seconds:
+                    await event.respond(
+                        f"فاصله نباید کمتر از {format_duration(min_seconds)} باشد "
+                        f"(این حداقل، برابر با چرخه‌ی بررسی داخلی ربات است). یک عدد بزرگ‌تر یا مساوی {format_duration(min_seconds)} بفرست.",
+                        buttons=self.cancel_buttons(),
+                    )
+                    return
                 self.db.update_group(group_id, interval_seconds=seconds)
                 self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
                 await event.respond(f"فاصله تکرار روی {format_duration(seconds)} تنظیم شد.\n\n{self.group_text(group_id)}", buttons=self.group_buttons(group_id))
