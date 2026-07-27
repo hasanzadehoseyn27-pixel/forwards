@@ -180,6 +180,9 @@ class Database:
     def update_entity_title(self, entity_id: int, title: str) -> None:
         self.execute("UPDATE entities SET title=? WHERE id=?", (title.strip(), entity_id))
 
+    def disable_entity(self, entity_id: int) -> None:
+        self.execute("UPDATE entities SET enabled=0 WHERE id=?", (entity_id,))
+
     def add_group(self, name: str) -> int:
         ts = now_ts()
         cur = self.execute(

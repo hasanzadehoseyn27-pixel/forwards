@@ -99,6 +99,18 @@ class ForwardEngine:
 
             if max_seen > last_id:
                 self.db.set_last_message_id(group_id, source_id, max_seen)
+        except ValueError as exc:
+            if str(exc).startswith("No user has"):
+                self.db.disable_entity(source_id)
+                self.db.mark_error(group_id, f"مبدا {peer} دیگر روی تلگرام وجود ندارد و خاموش شد")
+                log.warning(
+                    "مبدا %s دیگر پیدا نشد (یوزرنیم عوض شده یا حذف شده) و به‌صورت خودکار خاموش شد. "
+                    "برای فعال‌سازی دوباره باید یوزرنیم درست را از پنل وارد کنی.",
+                    peer,
+                )
+            else:
+                self.db.mark_error(group_id, f"خطا در خواندن مبدا {peer}: {exc}")
+                log.exception("خطا در خواندن مبدا %s", peer)
         except RPCError as exc:
             self.db.mark_error(group_id, f"خطای تلگرام هنگام خواندن مبدا {peer}: {exc.__class__.__name__}")
             log.warning("خطای تلگرام در خواندن مبدا %s: %s", peer, exc)
