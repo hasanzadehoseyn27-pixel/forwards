@@ -118,7 +118,7 @@ class Settings:
             max_job_attempts=_int("MAX_JOB_ATTEMPTS", 5),
             lock_stale_seconds=_int("LOCK_STALE_SECONDS", 120),
             watchdog_interval_seconds=_int("WATCHDOG_INTERVAL_SECONDS", 180),
-            watchdog_timeout_seconds=_int("WATCHDOG_TIMEOUT_SECONDS", 30),
+            watchdog_timeout_seconds=_int("WATCHDOG_TIMEOUT_SECONDS", 90),
             proxy_type=_optional("PROXY_TYPE"),
             proxy_host=_optional("PROXY_HOST"),
             proxy_port=_int("PROXY_PORT", 0) or None,

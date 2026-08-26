@@ -332,6 +332,10 @@ class Database:
         self.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
         return total
 
+    def count_pending_jobs(self, group_id: int) -> int:
+        row = self.fetchone("SELECT COUNT(*) as cnt FROM send_jobs WHERE group_id=? AND status='pending'", (group_id,))
+        return int(row["cnt"]) if row else 0
+
     def claim_next_job(self, worker_name: str) -> sqlite3.Row | None:
         ts = now_ts()
         with self.lock:

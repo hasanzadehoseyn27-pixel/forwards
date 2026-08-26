@@ -182,6 +182,7 @@ class ForwardEngine:
 
     async def enqueue_due_repeats(self) -> None:
         today = datetime.now(TEHRAN_TZ).date().isoformat()
+        max_pending_per_group = 100
         for group in self.db.active_groups():
             if group["mode"] != "repeat":
                 continue
@@ -193,6 +194,15 @@ class ForwardEngine:
                 self.db.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
                 continue
             if last_repeat and now_ts() - last_repeat < interval:
+                continue
+            pending = self.db.count_pending_jobs(group_id)
+            if pending >= max_pending_per_group:
+                self.db.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
+                log.warning(
+                    "گروه %s هنوز %s پیام در صف دارد؛ این دور تکرار رد شد تا صف خالی‌تر شود.",
+                    group_id,
+                    pending,
+                )
                 continue
             cycle_key = f"repeat:{today}:{now_ts() // max(1, interval)}"
             total = self.db.enqueue_repeat_due_messages(group_id, cycle_key, today)
@@ -212,7 +222,9 @@ class ForwardEngine:
     async def watchdog_loop(self) -> None:
         """هر چند دقیقه چک می‌کند کلاینت تلگرام واقعاً پاسخگوست یا فقط ظاهراً وصل است.
         اگر پاسخ نگرفت، عمداً کل پروسه را می‌بندد تا PM2 آن را تمیز دوباره بالا بیاورد،
-        چون تلاش برای ریکانکت دستی توی همین پروسه گاهی به‌خاطر هنگ‌کردن واقعی شبکه جواب نمی‌دهد."""
+        چون تلاش برای ریکانکت دستی توی همین پروسه گاهی به‌خاطر هنگ‌کردن واقعی شبکه جواب نمی‌دهد.
+        اگر همین الان یک یا چند گروه در محدودیت شناخته‌شده‌ی FloodWait هستند، کندی/عدم‌پاسخ
+        سریع طبیعی است (نه هنگ واقعی)، پس در آن حالت به‌جای کشتن پروسه فقط صبر می‌کند."""
         while not self.stop_event.is_set():
             await asyncio.sleep(self.settings.watchdog_interval_seconds)
             if self.stop_event.is_set():
@@ -222,8 +234,19 @@ class ForwardEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                now = now_ts()
+                active_flood_groups = [gid for gid, until in self._group_flood_until.items() if until > now]
+                if active_flood_groups:
+                    log.warning(
+                        "نگهبان: کلاینت به‌موقع پاسخ نداد (%s)، اما %s گروه در محدودیت شناخته‌شده‌ی FloodWait هستند؛ "
+                        "این کندی طبیعی است، پروسه بسته نمی‌شود.",
+                        exc,
+                        len(active_flood_groups),
+                    )
+                    continue
                 log.error(
-                    "نگهبان: کلاینت تلگرام به موقع پاسخ نداد (%s). برای ریست تمیز، پروسه الان بسته می‌شود تا PM2 دوباره بالا بیاوردش.",
+                    "نگهبان: کلاینت تلگرام به موقع پاسخ نداد (%s) و هیچ FloodWait شناخته‌شده‌ای هم در جریان نیست. "
+                    "برای ریست تمیز، پروسه الان بسته می‌شود تا PM2 دوباره بالا بیاوردش.",
                     exc,
                 )
                 os._exit(1)
