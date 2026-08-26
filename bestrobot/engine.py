@@ -253,13 +253,19 @@ class ForwardEngine:
 
     async def worker_loop(self, worker_name: str) -> None:
         while not self.stop_event.is_set():
-            job = self.db.claim_next_job(worker_name)
-            if not job:
-                await asyncio.sleep(1)
-                continue
-            async with self.send_semaphore:
-                await self.send_job(job)
-            await asyncio.sleep(self.settings.min_send_delay_seconds)
+            try:
+                job = self.db.claim_next_job(worker_name)
+                if not job:
+                    await asyncio.sleep(1)
+                    continue
+                async with self.send_semaphore:
+                    await self.send_job(job)
+                await asyncio.sleep(self.settings.min_send_delay_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("خطای غیرمنتظره در %s؛ ورکر به‌جای مردن، بعد از یک مکث ادامه می‌دهد.", worker_name)
+                await asyncio.sleep(2)
 
     async def send_job(self, job) -> None:
         group_id = int(job["group_id"])
