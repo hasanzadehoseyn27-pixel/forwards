@@ -258,7 +258,7 @@ class ForwardEngine:
                 int(job["id"]),
                 ok=False,
                 error="گروه خاموش است؛ ارسال فعلا عقب افتاد",
-                run_after=now_ts() + 60,
+                run_after=now_ts() + 3600,
                 max_attempts=999999,
             )
             return
