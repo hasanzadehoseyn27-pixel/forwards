@@ -1,3 +1,4 @@
 telethon>=1.36,<2
 PySocks>=1.7,<2
 python-socks[asyncio]>=2.4,<3
+tzdata>=2024.1

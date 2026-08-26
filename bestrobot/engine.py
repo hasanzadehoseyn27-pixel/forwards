@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
@@ -13,6 +14,8 @@ from .db import Database, now_ts
 
 
 log = logging.getLogger(__name__)
+
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 class ForwardEngine:
@@ -68,7 +71,7 @@ class ForwardEngine:
         group_id = int(group["id"])
         source_id = int(source["id"])
         peer = str(source["peer"])
-        today = datetime.now().date()
+        today = datetime.now(TEHRAN_TZ).date()
         try:
             last_id = self.db.get_last_message_id(group_id, source_id)
             if last_id <= 0:
@@ -122,7 +125,7 @@ class ForwardEngine:
         group_id = int(group["id"])
         source_id = int(source["id"])
         peer = str(source["peer"])
-        today = datetime.now().date()
+        today = datetime.now(TEHRAN_TZ).date()
         cycle_key = "once" if group["mode"] == "once" else "initial"
 
         collected = []
@@ -178,7 +181,7 @@ class ForwardEngine:
             await asyncio.sleep(self.settings.repeat_scan_seconds)
 
     async def enqueue_due_repeats(self) -> None:
-        today = datetime.now().date().isoformat()
+        today = datetime.now(TEHRAN_TZ).date().isoformat()
         for group in self.db.active_groups():
             if group["mode"] != "repeat":
                 continue
@@ -311,17 +314,17 @@ class ForwardEngine:
 
     def _message_date_text(self, value) -> str:
         if value is None:
-            return datetime.now().isoformat(timespec="seconds")
+            return datetime.now(TEHRAN_TZ).isoformat(timespec="seconds")
         try:
-            return value.astimezone().isoformat(timespec="seconds")
+            return value.astimezone(TEHRAN_TZ).isoformat(timespec="seconds")
         except Exception:
             return value.isoformat(timespec="seconds")
 
     def _local_date(self, value):
         if value is None:
-            return datetime.now().date()
+            return datetime.now(TEHRAN_TZ).date()
         try:
-            return value.astimezone().date()
+            return value.astimezone(TEHRAN_TZ).date()
         except Exception:
             return value.date()
 
