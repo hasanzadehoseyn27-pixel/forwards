@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 from contextlib import AsyncExitStack
 
@@ -99,10 +100,38 @@ async def command_run(settings: Settings, db: Database, force_lock: bool) -> Non
         try:
             await wait_forever()
         finally:
-            await engine.stop()
+            await _shutdown_gracefully(engine, bot, user, db)
+
+
+async def _shutdown_gracefully(engine: ForwardEngine, bot: TelegramClient, user: TelegramClient, db: Database) -> None:
+    """خاموش‌کردن تمیز، ولی با تایم‌اوت روی هر مرحله: قبلا اگر یکی از این مرحله‌ها
+    (مخصوصا disconnect شبکه‌ای) هنگ می‌کرد، کل پروسه نه واقعا می‌مرد نه کار می‌کرد؛
+    فقط 'آنلاین' می‌ماند بدون هیچ فعالیتی، و PM2 هم متوجه نمی‌شد که باید دوباره
+    بالایش بیاورد. الان اگر خاموش‌شدن تمیز بیش از حد طول بکشد، پروسه را عمدا
+    می‌بندیم تا PM2 واقعا تشخیص بدهد و از نو راه‌اندازی‌اش کند."""
+
+    try:
+        await asyncio.wait_for(_full_shutdown(engine, bot, user, db), timeout=45)
+    except asyncio.TimeoutError:
+        log.error("خاموش‌شدن تمیز کلا بیش از ۴۵ ثانیه طول کشید؛ پروسه برای اطمینان بسته می‌شود تا PM2 دوباره بالایش بیاورد.")
+        os._exit(1)
+
+
+async def _full_shutdown(engine: ForwardEngine, bot: TelegramClient | None, user: TelegramClient, db: Database) -> None:
+    try:
+        await engine.stop()
+    except Exception:
+        log.exception("خطا هنگام توقف موتور فوروارد.")
+    if bot is not None:
+        try:
             await bot.disconnect()
-            await user.disconnect()
-            db.close()
+        except Exception:
+            log.exception("خطا هنگام قطع اتصال بات پنل.")
+    try:
+        await user.disconnect()
+    except Exception:
+        log.exception("خطا هنگام قطع اتصال اکانت فوروارد.")
+    db.close()
 
 
 async def command_panel(settings: Settings, db: Database, force_lock: bool) -> None:
@@ -130,9 +159,11 @@ async def command_engine(settings: Settings, db: Database, force_lock: bool) -> 
         try:
             await wait_forever()
         finally:
-            await engine.stop()
-            await user.disconnect()
-            db.close()
+            try:
+                await asyncio.wait_for(_full_shutdown(engine, None, user, db), timeout=45)
+            except asyncio.TimeoutError:
+                log.error("خاموش‌شدن تمیز کلا بیش از ۴۵ ثانیه طول کشید؛ پروسه برای اطمینان بسته می‌شود تا PM2 دوباره بالایش بیاورد.")
+                os._exit(1)
 
 
 async def start_bot(settings: Settings) -> TelegramClient:
