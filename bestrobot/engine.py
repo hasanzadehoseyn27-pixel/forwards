@@ -7,7 +7,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import (
+    ChannelPrivateError,
+    ChatWriteForbiddenError,
+    FloodWaitError,
+    MessageIdInvalidError,
+    RPCError,
+)
 
 from .config import Settings
 from .db import Database, now_ts
@@ -322,6 +328,27 @@ class ForwardEngine:
                 max_attempts=999999,
             )
             log.warning("FloodWait برای گروه %s: %s ثانیه", group_id, wait_seconds)
+        except (ChatWriteForbiddenError, ChannelPrivateError) as exc:
+            # این خطا دائمیه (اکانت واقعاً از این مقصد بن شده یا کانال خصوصی/غیرقابل‌دسترسه)
+            # — هیچ‌وقت با retry درست نمیشه. قبلاً با RPCError عمومی retry می‌شد
+            # (هر ۲ دقیقه تا max_job_attempts بار) که باعث درخواست‌های بی‌فایده‌ی
+            # زیاد به تلگرام و تشدید FloodWait می‌شد.
+            self.db.finish_job(
+                int(job["id"]),
+                ok=False,
+                error=f"اکانت از مقصد {destination['peer']} بن شده یا بهش دسترسی نداره — دیگه تلاش نمی‌کنیم",
+                max_attempts=1,
+            )
+            log.warning("اکانت از مقصد %s بن شده/بی‌دسترسیه؛ job %s دیگه retry نمی‌شه.", destination["peer"], job["id"])
+        except MessageIdInvalidError as exc:
+            # این هم دائمیه — پیامِ مبدا حذف شده یا در دسترس نیست، با retry هم درست نمیشه.
+            self.db.finish_job(
+                int(job["id"]),
+                ok=False,
+                error="آیدیِ پیامِ مبدا نامعتبره (احتمالاً حذف شده) — دیگه تلاش نمی‌کنیم",
+                max_attempts=1,
+            )
+            log.warning("پیامِ مبدا برای job %s نامعتبره؛ دیگه retry نمی‌شه.", job["id"])
         except RPCError as exc:
             self.db.finish_job(
                 int(job["id"]),
