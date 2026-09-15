@@ -367,7 +367,7 @@ class Database:
                 self.conn.execute("ROLLBACK")
                 raise
 
-    def claim_next_batch(self, worker_name: str, batch_limit: int = 50) -> list[sqlite3.Row]:
+    def claim_next_batch(self, worker_name: str, batch_limit: int = 300) -> list[sqlite3.Row]:
         """مثل claim_next_job ولی به‌جای یک job، همه‌ی jobهای آماده‌ای که
         مبدا/مقصد/گروهشان یکی است را با هم برمی‌دارد (حداکثر batch_limit تا)،
         تا بتوان همه را با یک درخواست forward_messages یکجا فرستاد — این‌طوری

@@ -355,12 +355,33 @@ class ForwardEngine:
                 )
                 log.warning("پیامِ مبدا برای job %s نامعتبره؛ دیگه retry نمی‌شه.", job_ids[0])
             else:
-                # یکی از پیام‌های این دسته نامعتبره؛ برای اینکه بقیه‌ی دسته (که
-                # سالمن) از دست نرن، همین دسته را یکی‌یکی دوباره می‌فرستیم.
-                log.warning("یکی از پیام‌های دسته (گروه %s) نامعتبره؛ این دسته یکی‌یکی دوباره امتحان می‌شود.", group_id)
-                for j in jobs:
-                    await self.send_batch([j])
+                # یکی از پیام‌های این دسته نامعتبره؛ دسته را دو نیم می‌کنیم و هرکدام
+                # را جدا امتحان می‌کنیم تا فقط همان یک پیام خراب کنار برود، نه کل دسته.
+                mid = len(jobs) // 2
+                log.warning(
+                    "یکی از پیام‌های دسته (گروه %s، %s پیام) نامعتبره؛ دسته دو نیم می‌شود.",
+                    group_id,
+                    len(jobs),
+                )
+                await self.send_batch(jobs[:mid])
+                await self.send_batch(jobs[mid:])
         except RPCError as exc:
+            if len(jobs) > 1:
+                # این خطا ممکن است چون دسته خیلی بزرگ بوده رخ داده باشد (نه هر دلیل
+                # دیگری)؛ به‌جای اینکه کل دسته را ۲ دقیقه معطل کنیم، دو نیمش می‌کنیم
+                # و هر نیمه را جدا امتحان می‌کنیم. این‌طوری اندازه‌ی دسته خودش را با
+                # سقف واقعی تلگرام (که مستند نیست) تطبیق می‌دهد، بدون این‌که لازم
+                # باشد از قبل عدد درستش را حدس بزنیم.
+                mid = len(jobs) // 2
+                log.warning(
+                    "خطای تلگرام در ارسال دسته (گروه %s، %s پیام): %s؛ دسته دو نیم می‌شود.",
+                    group_id,
+                    len(jobs),
+                    exc,
+                )
+                await self.send_batch(jobs[:mid])
+                await self.send_batch(jobs[mid:])
+                return
             for jid in job_ids:
                 self.db.finish_job(
                     jid,
@@ -369,8 +390,19 @@ class ForwardEngine:
                     run_after=now_ts() + 120,
                     max_attempts=self.settings.max_job_attempts,
                 )
-            log.warning("خطای تلگرام در ارسال دسته (%s job): %s", len(job_ids), exc)
+            log.warning("خطای تلگرام در ارسال job %s: %s", job_ids[0], exc)
         except Exception as exc:
+            if len(jobs) > 1:
+                mid = len(jobs) // 2
+                log.warning(
+                    "خطای غیرمنتظره در ارسال دسته (گروه %s، %s پیام): %s؛ دسته دو نیم می‌شود.",
+                    group_id,
+                    len(jobs),
+                    exc,
+                )
+                await self.send_batch(jobs[:mid])
+                await self.send_batch(jobs[mid:])
+                return
             for jid in job_ids:
                 self.db.finish_job(
                     jid,
@@ -379,7 +411,7 @@ class ForwardEngine:
                     run_after=now_ts() + 120,
                     max_attempts=self.settings.max_job_attempts,
                 )
-            log.exception("خطای ارسال دسته (%s job)", len(job_ids))
+            log.exception("خطای ارسال job %s", job_ids[0])
 
     def _message_date_text(self, value) -> str:
         if value is None:
