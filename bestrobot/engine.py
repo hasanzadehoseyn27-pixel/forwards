@@ -260,12 +260,12 @@ class ForwardEngine:
     async def worker_loop(self, worker_name: str) -> None:
         while not self.stop_event.is_set():
             try:
-                job = self.db.claim_next_job(worker_name)
-                if not job:
+                jobs = self.db.claim_next_batch(worker_name)
+                if not jobs:
                     await asyncio.sleep(1)
                     continue
                 async with self.send_semaphore:
-                    await self.send_job(job)
+                    await self.send_batch(list(jobs))
                 await asyncio.sleep(self.settings.min_send_delay_seconds)
             except asyncio.CancelledError:
                 raise
@@ -273,100 +273,113 @@ class ForwardEngine:
                 log.exception("خطای غیرمنتظره در %s؛ ورکر به‌جای مردن، بعد از یک مکث ادامه می‌دهد.", worker_name)
                 await asyncio.sleep(2)
 
-    async def send_job(self, job) -> None:
-        group_id = int(job["group_id"])
+    async def send_batch(self, jobs: list) -> None:
+        first = jobs[0]
+        group_id = int(first["group_id"])
+        job_ids = [int(j["id"]) for j in jobs]
 
         blocked_until = self._group_flood_until.get(group_id)
         if blocked_until and now_ts() < blocked_until:
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error="گروه هنوز در محدودیت FloodWait قبلی است؛ ارسال عقب افتاد",
-                run_after=blocked_until,
-                max_attempts=999999,
-            )
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error="گروه هنوز در محدودیت FloodWait قبلی است؛ ارسال عقب افتاد",
+                    run_after=blocked_until,
+                    max_attempts=999999,
+                )
             return
 
         group = self.db.get_group(group_id)
         if not group or not group["enabled"]:
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error="گروه خاموش است؛ ارسال فعلا عقب افتاد",
-                run_after=now_ts() + 3600,
-                max_attempts=999999,
-            )
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error="گروه خاموش است؛ ارسال فعلا عقب افتاد",
+                    run_after=now_ts() + 3600,
+                    max_attempts=999999,
+                )
             return
 
-        source = self.db.fetchone("SELECT * FROM entities WHERE id=?", (int(job["source_id"]),))
-        destination = self.db.fetchone("SELECT * FROM entities WHERE id=?", (int(job["destination_id"]),))
+        source = self.db.fetchone("SELECT * FROM entities WHERE id=?", (int(first["source_id"]),))
+        destination = self.db.fetchone("SELECT * FROM entities WHERE id=?", (int(first["destination_id"]),))
         if not source or not destination:
-            self.db.finish_job(int(job["id"]), ok=False, error="مبدا یا مقصد حذف شده است", max_attempts=1)
+            for jid in job_ids:
+                self.db.finish_job(jid, ok=False, error="مبدا یا مقصد حذف شده است", max_attempts=1)
             return
 
+        message_ids = [int(j["telegram_message_id"]) for j in jobs]
         try:
             await self.client.forward_messages(
                 entity=str(destination["peer"]),
-                messages=int(job["telegram_message_id"]),
+                messages=message_ids,
                 from_peer=str(source["peer"]),
             )
-            self.db.finish_job(int(job["id"]), ok=True, max_attempts=self.settings.max_job_attempts)
+            for jid in job_ids:
+                self.db.finish_job(jid, ok=True, max_attempts=self.settings.max_job_attempts)
             log.info(
-                "ارسال موفق: گروه %s، پیام %s، مقصد %s",
+                "ارسال موفق (یکجا): گروه %s، %s پیام، مقصد %s",
                 group_id,
-                job["telegram_message_id"],
+                len(job_ids),
                 destination["peer"],
             )
         except FloodWaitError as exc:
             wait_seconds = int(getattr(exc, "seconds", 60)) + 5
             self._group_flood_until[group_id] = now_ts() + wait_seconds
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error=f"تلگرام محدودیت داد؛ {wait_seconds} ثانیه صبر",
-                run_after=now_ts() + wait_seconds,
-                max_attempts=999999,
-            )
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error=f"تلگرام محدودیت داد؛ {wait_seconds} ثانیه صبر",
+                    run_after=now_ts() + wait_seconds,
+                    max_attempts=999999,
+                )
             log.warning("FloodWait برای گروه %s: %s ثانیه", group_id, wait_seconds)
         except (ChatWriteForbiddenError, ChannelPrivateError) as exc:
-            # این خطا دائمیه (اکانت واقعاً از این مقصد بن شده یا کانال خصوصی/غیرقابل‌دسترسه)
-            # — هیچ‌وقت با retry درست نمیشه. قبلاً با RPCError عمومی retry می‌شد
-            # (هر ۲ دقیقه تا max_job_attempts بار) که باعث درخواست‌های بی‌فایده‌ی
-            # زیاد به تلگرام و تشدید FloodWait می‌شد.
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error=f"اکانت از مقصد {destination['peer']} بن شده یا بهش دسترسی نداره — دیگه تلاش نمی‌کنیم",
-                max_attempts=1,
-            )
-            log.warning("اکانت از مقصد %s بن شده/بی‌دسترسیه؛ job %s دیگه retry نمی‌شه.", destination["peer"], job["id"])
-        except MessageIdInvalidError as exc:
-            # این هم دائمیه — پیامِ مبدا حذف شده یا در دسترس نیست، با retry هم درست نمیشه.
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error="آیدیِ پیامِ مبدا نامعتبره (احتمالاً حذف شده) — دیگه تلاش نمی‌کنیم",
-                max_attempts=1,
-            )
-            log.warning("پیامِ مبدا برای job %s نامعتبره؛ دیگه retry نمی‌شه.", job["id"])
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error=f"اکانت از مقصد {destination['peer']} بن شده یا بهش دسترسی نداره — دیگه تلاش نمی‌کنیم",
+                    max_attempts=1,
+                )
+            log.warning("اکانت از مقصد %s بن شده/بی‌دسترسیه؛ %s job دیگه retry نمی‌شن.", destination["peer"], len(job_ids))
+        except MessageIdInvalidError:
+            if len(jobs) == 1:
+                self.db.finish_job(
+                    job_ids[0],
+                    ok=False,
+                    error="آیدیِ پیامِ مبدا نامعتبره (احتمالاً حذف شده) — دیگه تلاش نمی‌کنیم",
+                    max_attempts=1,
+                )
+                log.warning("پیامِ مبدا برای job %s نامعتبره؛ دیگه retry نمی‌شه.", job_ids[0])
+            else:
+                # یکی از پیام‌های این دسته نامعتبره؛ برای اینکه بقیه‌ی دسته (که
+                # سالمن) از دست نرن، همین دسته را یکی‌یکی دوباره می‌فرستیم.
+                log.warning("یکی از پیام‌های دسته (گروه %s) نامعتبره؛ این دسته یکی‌یکی دوباره امتحان می‌شود.", group_id)
+                for j in jobs:
+                    await self.send_batch([j])
         except RPCError as exc:
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error=f"خطای تلگرام در ارسال به {destination['peer']}: {exc.__class__.__name__}",
-                run_after=now_ts() + 120,
-                max_attempts=self.settings.max_job_attempts,
-            )
-            log.warning("خطای تلگرام در ارسال job %s: %s", job["id"], exc)
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error=f"خطای تلگرام در ارسال به {destination['peer']}: {exc.__class__.__name__}",
+                    run_after=now_ts() + 120,
+                    max_attempts=self.settings.max_job_attempts,
+                )
+            log.warning("خطای تلگرام در ارسال دسته (%s job): %s", len(job_ids), exc)
         except Exception as exc:
-            self.db.finish_job(
-                int(job["id"]),
-                ok=False,
-                error=f"خطای ارسال به {destination['peer']}: {exc}",
-                run_after=now_ts() + 120,
-                max_attempts=self.settings.max_job_attempts,
-            )
-            log.exception("خطای ارسال job %s", job["id"])
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error=f"خطای ارسال به {destination['peer']}: {exc}",
+                    run_after=now_ts() + 120,
+                    max_attempts=self.settings.max_job_attempts,
+                )
+            log.exception("خطای ارسال دسته (%s job)", len(job_ids))
 
     def _message_date_text(self, value) -> str:
         if value is None:

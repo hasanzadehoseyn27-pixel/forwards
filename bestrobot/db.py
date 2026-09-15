@@ -367,6 +367,63 @@ class Database:
                 self.conn.execute("ROLLBACK")
                 raise
 
+    def claim_next_batch(self, worker_name: str, batch_limit: int = 50) -> list[sqlite3.Row]:
+        """مثل claim_next_job ولی به‌جای یک job، همه‌ی jobهای آماده‌ای که
+        مبدا/مقصد/گروهشان یکی است را با هم برمی‌دارد (حداکثر batch_limit تا)،
+        تا بتوان همه را با یک درخواست forward_messages یکجا فرستاد — این‌طوری
+        در مقصد هم پشت‌سرهم و بدون فاصله ظاهر می‌شوند، و هم فشار کمتری روی
+        سهمیه‌ی FloodWait تلگرام می‌گذارد (یک درخواست به‌جای N تا)."""
+        ts = now_ts()
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                first = self.conn.execute(
+                    """
+                    SELECT * FROM send_jobs
+                    WHERE status='pending' AND run_after<=?
+                    ORDER BY run_after, id
+                    LIMIT 1
+                    """,
+                    (ts,),
+                ).fetchone()
+                if not first:
+                    self.conn.execute("COMMIT")
+                    return []
+                siblings = self.conn.execute(
+                    """
+                    SELECT id FROM send_jobs
+                    WHERE status='pending' AND run_after<=?
+                      AND group_id=? AND source_id=? AND destination_id=?
+                    ORDER BY telegram_message_id
+                    LIMIT ?
+                    """,
+                    (
+                        ts,
+                        int(first["group_id"]),
+                        int(first["source_id"]),
+                        int(first["destination_id"]),
+                        batch_limit,
+                    ),
+                ).fetchall()
+                ids = [int(r["id"]) for r in siblings]
+                if int(first["id"]) not in ids:
+                    ids.append(int(first["id"]))
+                placeholders = ",".join("?" for _ in ids)
+                self.conn.execute(
+                    f"UPDATE send_jobs SET status='running', attempts=attempts+1, locked_by=?, updated_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    (worker_name, ts, *ids),
+                )
+                self.conn.execute("COMMIT")
+                rows = self.conn.execute(
+                    f"SELECT * FROM send_jobs WHERE id IN ({placeholders}) ORDER BY telegram_message_id",
+                    ids,
+                ).fetchall()
+                return list(rows)
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
     def finish_job(self, job_id: int, ok: bool, error: str | None = None, run_after: int | None = None, max_attempts: int = 5) -> None:
         row = self.fetchone("SELECT attempts, group_id FROM send_jobs WHERE id=?", (job_id,))
         if not row:
