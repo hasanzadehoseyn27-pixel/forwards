@@ -39,6 +39,9 @@ INTERVAL_MINUTES = "دقیقه‌ای"
 INTERVAL_HOURS = "ساعتی"
 ADD_GROUP_SOURCE = "📥 افزودن مبدا به گروه"
 ADD_GROUP_DESTINATION = "📤 افزودن مقصد به گروه"
+REQUIRED_EMOJI = "🔥 ایموجی لازم"
+BANNED_WORDS = "🚫 کلمات ممنوعه"
+CLEAR_REQUIRED_EMOJI = "❌ حذف ایموجی لازم"
 
 
 class AdminPanel:
@@ -138,11 +141,22 @@ class AdminPanel:
                 await self.handle_pick_entity_multi(event, payload, text)
             elif name == "confirm_delete_group":
                 await self.handle_confirm_delete_group(event, payload, text)
+            elif name == "set_required_emoji":
+                group_id = int(payload["group_id"])
+                self.db.set_group_required_emoji(group_id, text)
+                self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
+                await event.respond(f"ایموجی لازم روی «{text}» تنظیم شد.\n\n{self.group_text(group_id)}", buttons=self.group_buttons(group_id))
+            elif name == "add_banned_word":
+                group_id = int(payload["group_id"])
+                self.db.add_banned_word(group_id, text)
+                self.db.set_panel_action(event.sender_id, "add_banned_word", {"group_id": group_id})
+                await event.respond(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
+                await event.respond("کلمه‌ی بعدی را بفرست، یا «↩️ بازگشت» بزن.", buttons=self.cancel_buttons())
             else:
                 await event.respond("عملیات نامشخص بود. دوباره از منو انتخاب کن.", buttons=self.main_buttons())
         except Exception as exc:
             log.exception("خطای پنل در action=%s", name)
-            if name in {"set_interval", "set_interval_unit", "set_interval_value", "add_entity", "pick_entity_multi", "stagger_names", "stagger_gap", "confirm_delete_group"}:
+            if name in {"set_interval", "set_interval_unit", "set_interval_value", "add_entity", "pick_entity_multi", "stagger_names", "stagger_gap", "confirm_delete_group", "set_required_emoji", "add_banned_word"}:
                 self.db.set_panel_action(event.sender_id, name, payload)
                 buttons = self.interval_unit_buttons() if name == "set_interval_unit" else self.cancel_buttons()
             else:
@@ -234,6 +248,15 @@ class AdminPanel:
                 await event.edit(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
             except Exception:
                 await event.respond(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
+            return
+        if data.startswith("bwdel|"):
+            _, group_id_s, word_id_s = data.split("|")
+            group_id, word_id = int(group_id_s), int(word_id_s)
+            self.db.remove_banned_word(word_id)
+            try:
+                await event.edit(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
+            except Exception:
+                await event.respond(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
             return
         await event.respond(self.main_text(), buttons=self.main_buttons())
 
@@ -366,6 +389,27 @@ class AdminPanel:
                 "اگر مقصد جدیدی داری که در این لیست نیست، یوزرنیمش را با @ بفرست تا اضافه و مستقیم به این گروه وصل شود.",
                 buttons=self.cancel_buttons(),
             )
+            return True
+        if text == CLEAR_REQUIRED_EMOJI:
+            self.db.set_group_required_emoji(group_id, None)
+            self.db.set_panel_action(event.sender_id, "group_menu", {"group_id": group_id})
+            await event.respond(f"ایموجی لازم حذف شد.\n\n{self.group_text(group_id)}", buttons=self.group_buttons(group_id))
+            return True
+        if text == REQUIRED_EMOJI:
+            group = self.db.get_group(group_id)
+            current = group["required_emoji"] if group and "required_emoji" in group.keys() else None
+            self.db.set_panel_action(event.sender_id, "set_required_emoji", {"group_id": group_id})
+            note = f"الان: {current}" if current else "الان چیزی تنظیم نشده (فیلتری اعمال نمی‌شود)."
+            buttons = [[CLEAR_REQUIRED_EMOJI]] if current else []
+            await event.respond(
+                f"{note}\n\nایموجی/متنی که باید توی آگهی باشد را بفرست (مثلاً 🔥). اگر نباشد، آن آگهی فوروارد نمی‌شود.",
+                buttons=reply_keyboard(buttons + [[HOME, BACK]]) if buttons else self.cancel_buttons(),
+            )
+            return True
+        if text == BANNED_WORDS:
+            self.db.set_panel_action(event.sender_id, "add_banned_word", {"group_id": group_id})
+            await event.respond(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
+            await event.respond("برای افزودن کلمه‌ی ممنوعه‌ی جدید، همین‌جا بفرستش.", buttons=self.cancel_buttons())
             return True
         if text == DELETE_GROUP:
             group = self.db.get_group(group_id)
@@ -554,6 +598,23 @@ class AdminPanel:
             return f"{label}\nهنوز چیزی ثبت نشده."
         return f"{label} (مجموع {total})\nروی نام بزن تا خودِ کانال/گروه در تلگرام باز شود؛ روی 🗑 بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
 
+    def banned_words_text(self, group_id: int) -> str:
+        words = self.db.list_banned_words(group_id)
+        header = f"کلمات ممنوعه‌ی گروه {group_id} (اگر متن آگهی شامل هرکدام باشد، فوروارد نمی‌شود):"
+        if not words:
+            return f"{header}\nهیچ کلمه‌ای ثبت نشده."
+        return header
+
+    def banned_words_keyboard(self, group_id: int):
+        words = self.db.list_banned_words(group_id)
+        rows = []
+        for row in words:
+            word_id = int(row["id"])
+            rows.append([Button.inline(f"🗑 {row['word']}", f"bwdel|{group_id}|{word_id}".encode())])
+        if not rows:
+            rows.append([Button.inline("چیزی ثبت نشده", b"noop")])
+        return rows
+
     def entities_list_keyboard(self, kind: str, page: int):
         all_rows = self.db.list_entities(kind)
         page_size = 10
@@ -618,11 +679,16 @@ class AdminPanel:
         mode = "ارسال یک‌بار" if group["mode"] == "once" else "ارسال دائمی"
         sources = "\n".join(f"- {display_entity_label(row)}" for row in status["sources"]) or "-"
         destinations = "\n".join(f"- {display_entity_label(row)}" for row in status["destinations"]) or "-"
+        required_emoji = group["required_emoji"] if "required_emoji" in group.keys() else None
+        emoji_line = required_emoji if required_emoji else "—"
+        banned_count = len(self.db.list_banned_words(group_id))
         return (
             f"گروه {group['id']} - {group['name']}\n"
             f"وضعیت: {state}\n"
             f"حالت: {mode}\n"
             f"فاصله: {format_duration(group['interval_seconds'])}\n"
+            f"ایموجی لازم: {emoji_line}\n"
+            f"کلمات ممنوعه: {banned_count} مورد\n"
             f"\nمبداها:\n{sources}\n"
             f"\nمقصدها:\n{destinations}"
         )
@@ -634,6 +700,8 @@ class AdminPanel:
                 [MODE_ONCE, MODE_REPEAT],
                 [ADD_GROUP_SOURCE],
                 [ADD_GROUP_DESTINATION],
+                [REQUIRED_EMOJI],
+                [BANNED_WORDS],
                 [DELETE_GROUP],
                 [GROUPS, HOME],
             ]

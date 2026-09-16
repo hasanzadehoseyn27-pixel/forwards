@@ -12,6 +12,9 @@ def now_ts() -> int:
     return int(time.time())
 
 
+DEFAULT_BANNED_WORDS = ["تمام", "برکت", "خط خوردگی", "مصیبت", "تسلیت"]
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -44,8 +47,17 @@ class Database:
             mode TEXT NOT NULL DEFAULT 'once' CHECK(mode IN ('once','repeat')),
             interval_seconds INTEGER NOT NULL DEFAULT 1800,
             enabled INTEGER NOT NULL DEFAULT 0,
+            required_emoji TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS group_banned_words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES forward_groups(id) ON DELETE CASCADE,
+            word TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(group_id, word)
         );
 
         CREATE TABLE IF NOT EXISTS group_sources (
@@ -83,6 +95,7 @@ class Database:
             source_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
             telegram_message_id INTEGER NOT NULL,
             message_date TEXT NOT NULL,
+            text TEXT,
             created_at INTEGER NOT NULL,
             UNIQUE(group_id, source_id, telegram_message_id)
         );
@@ -145,6 +158,32 @@ class Database:
         """
         with self.lock:
             self.conn.executescript(schema)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        # این‌ها برای دیتابیس‌هایی هستند که قبل از اضافه‌شدن این ستون‌ها ساخته شده‌اند؛
+        # CREATE TABLE IF NOT EXISTS ستون جدید به جدول موجود اضافه نمی‌کند.
+        migrations = [
+            "ALTER TABLE forward_groups ADD COLUMN required_emoji TEXT",
+            "ALTER TABLE message_cache ADD COLUMN text TEXT",
+        ]
+        for stmt in migrations:
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # ستون از قبل وجود دارد
+        existing_group_ids = [int(r["id"]) for r in self.conn.execute("SELECT id FROM forward_groups").fetchall()]
+        for group_id in existing_group_ids:
+            has_words = self.conn.execute(
+                "SELECT 1 FROM group_banned_words WHERE group_id=? LIMIT 1", (group_id,)
+            ).fetchone()
+            if has_words:
+                continue
+            for word in DEFAULT_BANNED_WORDS:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO group_banned_words(group_id, word, created_at) VALUES(?, ?, ?)",
+                    (group_id, word, now_ts()),
+                )
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
         with self.lock:
@@ -194,6 +233,11 @@ class Database:
         )
         group_id = int(cur.lastrowid)
         self.execute("INSERT OR IGNORE INTO group_health(group_id) VALUES(?)", (group_id,))
+        for word in DEFAULT_BANNED_WORDS:
+            self.execute(
+                "INSERT OR IGNORE INTO group_banned_words(group_id, word, created_at) VALUES(?, ?, ?)",
+                (group_id, word, ts),
+            )
         return group_id
 
     def list_groups(self) -> list[sqlite3.Row]:
@@ -290,13 +334,13 @@ class Database:
             (group_id, source_id, message_id, now_ts()),
         )
 
-    def remember_message(self, group_id: int, source_id: int, message_id: int, message_date: str) -> None:
+    def remember_message(self, group_id: int, source_id: int, message_id: int, message_date: str, text: str | None = None) -> None:
         self.execute(
             """
-            INSERT OR IGNORE INTO message_cache(group_id, source_id, telegram_message_id, message_date, created_at)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO message_cache(group_id, source_id, telegram_message_id, message_date, text, created_at)
+            VALUES(?, ?, ?, ?, ?, ?)
             """,
-            (group_id, source_id, message_id, message_date, now_ts()),
+            (group_id, source_id, message_id, message_date, text, now_ts()),
         )
 
     def enqueue_message(self, group_id: int, source_id: int, message_id: int, cycle_key: str, run_after: int | None = None) -> int:
@@ -317,10 +361,46 @@ class Database:
             count += 1
         return count
 
+    def should_forward_text(self, group_id: int, text: str | None) -> bool:
+        """طبق دو فیلتر گروه تصمیم می‌گیرد این متن فوروارد شود یا نه:
+        ۱) اگر گروه یک «ایموجی لازم» دارد، آن ایموجی باید در متن باشد.
+        ۲) اگر متن شامل هرکدام از «کلمات ممنوعه»ی گروه باشد، فوروارد نمی‌شود."""
+        text = text or ""
+        group = self.fetchone("SELECT required_emoji FROM forward_groups WHERE id=?", (group_id,))
+        if group and group["required_emoji"]:
+            if str(group["required_emoji"]) not in text:
+                return False
+        for row in self.list_banned_words(group_id):
+            word = str(row["word"]).strip()
+            if word and word in text:
+                return False
+        return True
+
+    def set_group_required_emoji(self, group_id: int, emoji: str | None) -> None:
+        self.execute(
+            "UPDATE forward_groups SET required_emoji=?, updated_at=? WHERE id=?",
+            (emoji, now_ts(), group_id),
+        )
+
+    def list_banned_words(self, group_id: int) -> list[sqlite3.Row]:
+        return self.fetchall("SELECT * FROM group_banned_words WHERE group_id=? ORDER BY id", (group_id,))
+
+    def add_banned_word(self, group_id: int, word: str) -> None:
+        word = word.strip()
+        if not word:
+            return
+        self.execute(
+            "INSERT OR IGNORE INTO group_banned_words(group_id, word, created_at) VALUES(?, ?, ?)",
+            (group_id, word, now_ts()),
+        )
+
+    def remove_banned_word(self, word_id: int) -> None:
+        self.execute("DELETE FROM group_banned_words WHERE id=?", (word_id,))
+
     def enqueue_repeat_due_messages(self, group_id: int, cycle_key: str, today_prefix: str) -> int:
         rows = self.fetchall(
             """
-            SELECT source_id, telegram_message_id FROM message_cache
+            SELECT source_id, telegram_message_id, text FROM message_cache
             WHERE group_id=? AND message_date LIKE ?
             ORDER BY telegram_message_id
             """,
@@ -328,6 +408,8 @@ class Database:
         )
         total = 0
         for row in rows:
+            if not self.should_forward_text(group_id, row["text"]):
+                continue
             total += self.enqueue_message(group_id, int(row["source_id"]), int(row["telegram_message_id"]), cycle_key)
         self.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
         return total
