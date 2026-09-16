@@ -14,6 +14,7 @@ from telethon.errors import (
     MessageIdInvalidError,
     RPCError,
 )
+from telethon.tl.types import MessageEntityStrike
 
 from .config import Settings
 from .db import Database, now_ts
@@ -100,10 +101,11 @@ class ForwardEngine:
                     log.info("پیام %s از %s استیکر است؛ فوروارد نمی‌شود.", message.id, peer)
                     continue
                 date_text = self._message_date_text(message.date)
-                self.db.remember_message(group_id, source_id, int(message.id), date_text, message.text)
-                if not self.db.should_forward_text(group_id, message.text):
+                has_strike = self._has_strike(message)
+                self.db.remember_message(group_id, source_id, int(message.id), date_text, message.text, has_strike)
+                if not self.db.should_forward(group_id, message.text, has_strike):
                     log.info(
-                        "پیام %s از %s فیلتر شد (ایموجی لازم یا کلمه ممنوعه)؛ فوروارد نمی‌شود.",
+                        "پیام %s از %s فیلتر شد (ایموجی لازم/کلمه ممنوعه/خط‌خوردگی)؛ فوروارد نمی‌شود.",
                         message.id,
                         peer,
                     )
@@ -169,7 +171,7 @@ class ForwardEngine:
                 message = latest[0]
                 message_id = int(message.id)
                 date_text = self._message_date_text(message.date)
-                self.db.remember_message(group_id, source_id, message_id, date_text, message.text)
+                self.db.remember_message(group_id, source_id, message_id, date_text, message.text, self._has_strike(message))
                 self.db.set_last_message_id(group_id, source_id, message_id)
                 log.info("گروه %s / مبدا %s امروز پستی نداشت؛ از پیام %s به بعد ادامه می‌شود.", group_id, peer, message_id)
             return
@@ -178,11 +180,12 @@ class ForwardEngine:
         for message in reversed(collected):
             message_id = int(message.id)
             date_text = self._message_date_text(message.date)
-            self.db.remember_message(group_id, source_id, message_id, date_text, message.text)
-            if self.db.should_forward_text(group_id, message.text):
+            has_strike = self._has_strike(message)
+            self.db.remember_message(group_id, source_id, message_id, date_text, message.text, has_strike)
+            if self.db.should_forward(group_id, message.text, has_strike):
                 self.db.enqueue_message(group_id, source_id, message_id, cycle_key)
             else:
-                log.info("پیام %s از %s فیلتر شد (ایموجی لازم یا کلمه ممنوعه)؛ فوروارد نمی‌شود.", message_id, peer)
+                log.info("پیام %s از %s فیلتر شد (ایموجی لازم/کلمه ممنوعه/خط‌خوردگی)؛ فوروارد نمی‌شود.", message_id, peer)
             max_seen = max(max_seen, message_id)
 
         self.db.set_last_message_id(group_id, source_id, max_seen)
@@ -442,5 +445,12 @@ class ForwardEngine:
     def _is_sticker(self, message) -> bool:
         try:
             return message.sticker is not None
+        except Exception:
+            return False
+
+    def _has_strike(self, message) -> bool:
+        try:
+            entities = message.entities or []
+            return any(isinstance(e, MessageEntityStrike) for e in entities)
         except Exception:
             return False

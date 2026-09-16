@@ -12,7 +12,7 @@ def now_ts() -> int:
     return int(time.time())
 
 
-DEFAULT_BANNED_WORDS = ["تمام", "برکت", "خط خوردگی", "مصیبت", "تسلیت"]
+DEFAULT_BANNED_WORDS = ["تمام", "برکت", "مصیبت", "تسلیت"]
 
 
 class Database:
@@ -48,6 +48,7 @@ class Database:
             interval_seconds INTEGER NOT NULL DEFAULT 1800,
             enabled INTEGER NOT NULL DEFAULT 0,
             required_emoji TEXT,
+            block_strikethrough INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
@@ -96,6 +97,7 @@ class Database:
             telegram_message_id INTEGER NOT NULL,
             message_date TEXT NOT NULL,
             text TEXT,
+            has_strike INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             UNIQUE(group_id, source_id, telegram_message_id)
         );
@@ -165,7 +167,9 @@ class Database:
         # CREATE TABLE IF NOT EXISTS ستون جدید به جدول موجود اضافه نمی‌کند.
         migrations = [
             "ALTER TABLE forward_groups ADD COLUMN required_emoji TEXT",
+            "ALTER TABLE forward_groups ADD COLUMN block_strikethrough INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE message_cache ADD COLUMN text TEXT",
+            "ALTER TABLE message_cache ADD COLUMN has_strike INTEGER NOT NULL DEFAULT 0",
         ]
         for stmt in migrations:
             try:
@@ -334,13 +338,21 @@ class Database:
             (group_id, source_id, message_id, now_ts()),
         )
 
-    def remember_message(self, group_id: int, source_id: int, message_id: int, message_date: str, text: str | None = None) -> None:
+    def remember_message(
+        self,
+        group_id: int,
+        source_id: int,
+        message_id: int,
+        message_date: str,
+        text: str | None = None,
+        has_strike: bool = False,
+    ) -> None:
         self.execute(
             """
-            INSERT OR IGNORE INTO message_cache(group_id, source_id, telegram_message_id, message_date, text, created_at)
-            VALUES(?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO message_cache(group_id, source_id, telegram_message_id, message_date, text, has_strike, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
             """,
-            (group_id, source_id, message_id, message_date, text, now_ts()),
+            (group_id, source_id, message_id, message_date, text, 1 if has_strike else 0, now_ts()),
         )
 
     def enqueue_message(self, group_id: int, source_id: int, message_id: int, cycle_key: str, run_after: int | None = None) -> int:
@@ -361,20 +373,32 @@ class Database:
             count += 1
         return count
 
-    def should_forward_text(self, group_id: int, text: str | None) -> bool:
-        """طبق دو فیلتر گروه تصمیم می‌گیرد این متن فوروارد شود یا نه:
+    def should_forward(self, group_id: int, text: str | None, has_strike: bool = False) -> bool:
+        """طبق فیلترهای گروه تصمیم می‌گیرد این پیام فوروارد شود یا نه:
         ۱) اگر گروه یک «ایموجی لازم» دارد، آن ایموجی باید در متن باشد.
-        ۲) اگر متن شامل هرکدام از «کلمات ممنوعه»ی گروه باشد، فوروارد نمی‌شود."""
+        ۲) اگر متن شامل هرکدام از «کلمات ممنوعه»ی گروه باشد، فوروارد نمی‌شود.
+        ۳) اگر فیلتر «خط‌خوردگی» گروه فعال است و پیام فرمت خط‌خورده دارد، فوروارد نمی‌شود."""
         text = text or ""
-        group = self.fetchone("SELECT required_emoji FROM forward_groups WHERE id=?", (group_id,))
+        group = self.fetchone("SELECT required_emoji, block_strikethrough FROM forward_groups WHERE id=?", (group_id,))
         if group and group["required_emoji"]:
             if str(group["required_emoji"]) not in text:
                 return False
+        if group and int(group["block_strikethrough"] or 0) and has_strike:
+            return False
         for row in self.list_banned_words(group_id):
             word = str(row["word"]).strip()
             if word and word in text:
                 return False
         return True
+
+    def toggle_group_strikethrough(self, group_id: int) -> bool:
+        group = self.fetchone("SELECT block_strikethrough FROM forward_groups WHERE id=?", (group_id,))
+        new_value = 0 if (group and int(group["block_strikethrough"] or 0)) else 1
+        self.execute(
+            "UPDATE forward_groups SET block_strikethrough=?, updated_at=? WHERE id=?",
+            (new_value, now_ts(), group_id),
+        )
+        return bool(new_value)
 
     def set_group_required_emoji(self, group_id: int, emoji: str | None) -> None:
         self.execute(
@@ -400,7 +424,7 @@ class Database:
     def enqueue_repeat_due_messages(self, group_id: int, cycle_key: str, today_prefix: str) -> int:
         rows = self.fetchall(
             """
-            SELECT source_id, telegram_message_id, text FROM message_cache
+            SELECT source_id, telegram_message_id, text, has_strike FROM message_cache
             WHERE group_id=? AND message_date LIKE ?
             ORDER BY telegram_message_id
             """,
@@ -408,7 +432,7 @@ class Database:
         )
         total = 0
         for row in rows:
-            if not self.should_forward_text(group_id, row["text"]):
+            if not self.should_forward(group_id, row["text"], bool(row["has_strike"])):
                 continue
             total += self.enqueue_message(group_id, int(row["source_id"]), int(row["telegram_message_id"]), cycle_key)
         self.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))

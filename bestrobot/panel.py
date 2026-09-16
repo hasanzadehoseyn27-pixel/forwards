@@ -249,6 +249,15 @@ class AdminPanel:
             except Exception:
                 await event.respond(self.entities_list_text(kind, page), buttons=self.entities_list_keyboard(kind, page))
             return
+        if data.startswith("swtoggle|"):
+            _, group_id_s = data.split("|")
+            group_id = int(group_id_s)
+            self.db.toggle_group_strikethrough(group_id)
+            try:
+                await event.edit(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
+            except Exception:
+                await event.respond(self.banned_words_text(group_id), buttons=self.banned_words_keyboard(group_id))
+            return
         if data.startswith("bwdel|"):
             _, group_id_s, word_id_s = data.split("|")
             group_id, word_id = int(group_id_s), int(word_id_s)
@@ -600,19 +609,23 @@ class AdminPanel:
 
     def banned_words_text(self, group_id: int) -> str:
         words = self.db.list_banned_words(group_id)
-        header = f"کلمات ممنوعه‌ی گروه {group_id} (اگر متن آگهی شامل هرکدام باشد، فوروارد نمی‌شود):"
+        header = (
+            f"دکمه‌ی بالا، فیلتر «خط‌خوردگی» (استرایک‌تروی متن تلگرام) را روشن/خاموش می‌کند.\n\n"
+            f"کلمات ممنوعه‌ی گروه {group_id} (اگر متن آگهی شامل هرکدام باشد، فوروارد نمی‌شود):"
+        )
         if not words:
             return f"{header}\nهیچ کلمه‌ای ثبت نشده."
         return header
 
     def banned_words_keyboard(self, group_id: int):
+        group = self.db.get_group(group_id)
+        strike_on = bool(group and int(group["block_strikethrough"] or 0)) if group else False
+        strike_label = "✅ فیلتر خط‌خوردگی: فعال (بزن تا خاموش شود)" if strike_on else "⬜️ فیلتر خط‌خوردگی: خاموش (بزن تا فعال شود)"
+        rows = [[Button.inline(strike_label, f"swtoggle|{group_id}".encode())]]
         words = self.db.list_banned_words(group_id)
-        rows = []
         for row in words:
             word_id = int(row["id"])
             rows.append([Button.inline(f"🗑 {row['word']}", f"bwdel|{group_id}|{word_id}".encode())])
-        if not rows:
-            rows.append([Button.inline("چیزی ثبت نشده", b"noop")])
         return rows
 
     def entities_list_keyboard(self, kind: str, page: int):
@@ -682,6 +695,8 @@ class AdminPanel:
         required_emoji = group["required_emoji"] if "required_emoji" in group.keys() else None
         emoji_line = required_emoji if required_emoji else "—"
         banned_count = len(self.db.list_banned_words(group_id))
+        strike_on = bool(int(group["block_strikethrough"] or 0)) if "block_strikethrough" in group.keys() else False
+        strike_line = "فعال" if strike_on else "خاموش"
         return (
             f"گروه {group['id']} - {group['name']}\n"
             f"وضعیت: {state}\n"
@@ -689,6 +704,7 @@ class AdminPanel:
             f"فاصله: {format_duration(group['interval_seconds'])}\n"
             f"ایموجی لازم: {emoji_line}\n"
             f"کلمات ممنوعه: {banned_count} مورد\n"
+            f"فیلتر خط‌خوردگی: {strike_line}\n"
             f"\nمبداها:\n{sources}\n"
             f"\nمقصدها:\n{destinations}"
         )
