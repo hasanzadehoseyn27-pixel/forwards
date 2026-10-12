@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient
 from telethon.errors import (
     ChannelPrivateError,
+    ChatForwardsRestrictedError,
     ChatWriteForbiddenError,
     FloodWaitError,
     MessageIdInvalidError,
@@ -16,6 +17,7 @@ from telethon.errors import (
 )
 from telethon.tl.types import MessageEntityStrike
 
+from .bot_pool import BotApiError, BotPool, PoolBot
 from .config import Settings
 from .db import Database, now_ts
 
@@ -26,10 +28,18 @@ TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 class ForwardEngine:
-    def __init__(self, client: TelegramClient, db: Database, settings: Settings) -> None:
+    def __init__(self, client: TelegramClient, db: Database, settings: Settings, pool: BotPool | None = None) -> None:
         self.client = client
         self.db = db
         self.settings = settings
+        # اگر استخر ربات فعال باشد، ارسال در گروه‌های مقصد با ربات‌هاست و
+        # اکانت فقط پیام را یک بار در پی‌وی یک ربات فوروارد می‌کند.
+        self.pool = pool if (pool is not None and pool.enabled) else None
+        self._dest_chat_ids: dict[int, int] = {}
+        # (bot_index, chat_id) -> تا این زمان این ربات در این مقصد استفاده نمی‌شود
+        # (بیرون شده/عضو نیست/اجازه‌ی ارسال ندارد)
+        self._bot_blocked: dict[tuple[int, int], int] = {}
+        self._last_relay_purge = 0
         self.stop_event = asyncio.Event()
         self.send_semaphore = asyncio.Semaphore(settings.max_parallel_sends)
         self.tasks: list[asyncio.Task[None]] = []
@@ -59,6 +69,11 @@ class ForwardEngine:
     async def scan_sources_loop(self) -> None:
         while not self.stop_event.is_set():
             try:
+                if self.pool and now_ts() - self._last_relay_purge > 6 * 3600:
+                    self._last_relay_purge = now_ts()
+                    purged = self.db.purge_old_relays()
+                    if purged:
+                        log.info("%s رکورد قدیمی relay پاک شد.", purged)
                 await self.scan_sources_once()
             except Exception:
                 log.exception("خطا در اسکن مبداها")
@@ -322,6 +337,10 @@ class ForwardEngine:
                 self.db.finish_job(jid, ok=False, error="مبدا یا مقصد حذف شده است", max_attempts=1)
             return
 
+        if self.pool is not None:
+            await self.send_batch_via_bots(jobs, group_id, source, destination)
+            return
+
         message_ids = [int(j["telegram_message_id"]) for j in jobs]
         try:
             await self.client.forward_messages(
@@ -425,6 +444,204 @@ class ForwardEngine:
                     max_attempts=self.settings.max_job_attempts,
                 )
             log.exception("خطای ارسال job %s", job_ids[0])
+
+    # ------------------------------------------------------------ bot pool
+
+    async def _destination_chat_id(self, destination) -> int:
+        """شناسه‌ی عددی مقصد (مثل -100...) که Bot API می‌فهمد."""
+        dest_id = int(destination["id"])
+        cached = self._dest_chat_ids.get(dest_id)
+        if cached:
+            return cached
+        chat_id = int(await self.client.get_peer_id(str(destination["peer"])))
+        self._dest_chat_ids[dest_id] = chat_id
+        return chat_id
+
+    def _bot_usable(self, bot: PoolBot | None, chat_id: int) -> bool:
+        if bot is None or not bot.alive:
+            return False
+        until = self._bot_blocked.get((bot.index, chat_id), 0)
+        return until <= now_ts()
+
+    def _pick_new_owner(self, chat_id: int, exclude: set[int]) -> PoolBot | None:
+        """یک ربات سالم که در این مقصد بلاک نیست؛ اول آن‌هایی که الان در محدودیت 429 نیستند."""
+        assert self.pool is not None
+        candidates = []
+        for _ in range(len(self.pool.bots)):
+            bot = self.pool.pick_owner()
+            if bot is None:
+                return None
+            if bot.index in exclude or not self._bot_usable(bot, chat_id):
+                continue
+            if self.pool.flood_remaining(bot, chat_id) <= 0:
+                return bot
+            candidates.append(bot)
+        if candidates:
+            return min(candidates, key=lambda b: self.pool.flood_remaining(b, chat_id))
+        return None
+
+    def _defer(self, jobs: list, seconds: int, error: str) -> None:
+        for job in jobs:
+            self.db.finish_job(
+                int(job["id"]),
+                ok=False,
+                error=error,
+                run_after=now_ts() + max(1, int(seconds)),
+                max_attempts=999999,
+            )
+
+    def _fail_permanently(self, jobs: list, error: str) -> None:
+        for job in jobs:
+            self.db.finish_job(int(job["id"]), ok=False, error=error, max_attempts=1)
+
+    async def send_batch_via_bots(self, jobs: list, group_id: int, source, destination) -> None:
+        assert self.pool is not None
+        source_id = int(source["id"])
+        source_peer = str(source["peer"])
+        dest_peer = str(destination["peer"])
+
+        try:
+            chat_id = await self._destination_chat_id(destination)
+        except Exception as exc:  # noqa: BLE001
+            self._defer(jobs, 300, f"شناسه‌ی مقصد {dest_peer} پیدا نشد: {exc}")
+            log.warning("شناسه‌ی عددی مقصد %s پیدا نشد: %s", dest_peer, exc)
+            return
+
+        message_ids = [int(j["telegram_message_id"]) for j in jobs]
+        holders = self.db.get_relays(source_id, message_ids)
+
+        # برای هر job: کدام ربات (و با کدام شناسه‌ی پی‌وی) آن را بفرستد
+        plan: dict[int, list[tuple[object, int]]] = {}
+        need_relay: list = []
+        for job in jobs:
+            mid = int(job["telegram_message_id"])
+            choice = None
+            for bot_index, bot_mid in holders.get(mid, []):
+                bot = self.pool.bot_by_index(bot_index)
+                if not self._bot_usable(bot, chat_id):
+                    continue
+                if choice is None or self.pool.flood_remaining(bot, chat_id) < self.pool.flood_remaining(choice[0], chat_id):
+                    choice = (bot, bot_mid)
+            if choice is None:
+                need_relay.append(job)
+            else:
+                plan.setdefault(choice[0].index, []).append((job, choice[1]))
+
+        if need_relay:
+            exclude = {
+                bot_index
+                for job in need_relay
+                for bot_index, _ in holders.get(int(job["telegram_message_id"]), [])
+            }
+            owner = self._pick_new_owner(chat_id, exclude)
+            if owner is None:
+                self._defer(
+                    need_relay,
+                    300,
+                    f"هیچ ربات سالمی برای مقصد {dest_peer} نیست (ربات‌ها عضو این گروه نیستند یا بیرون شده‌اند)",
+                )
+                log.warning("هیچ ربات قابل‌استفاده‌ای برای مقصد %s نیست.", dest_peer)
+            else:
+                relay_ids = [int(j["telegram_message_id"]) for j in need_relay]
+                mapping: dict[int, int] = {}
+                try:
+                    for start in range(0, len(relay_ids), 100):
+                        chunk = relay_ids[start : start + 100]
+                        mapping.update(await self.pool.relay(self.client, source_peer, chunk, source_id, owner))
+                except FloodWaitError as exc:
+                    wait_seconds = int(getattr(exc, "seconds", 60)) + 5
+                    self._group_flood_until[group_id] = now_ts() + wait_seconds
+                    log.warning("FloodWait اکانت هنگام انتقال پیام به ربات‌ها: %s ثانیه", wait_seconds)
+                except ChatForwardsRestrictedError:
+                    self._fail_permanently(need_relay, f"مبدا {source_peer} اجازه‌ی فوروارد نمی‌دهد (محتوای محافظت‌شده)")
+                    need_relay = []
+                except MessageIdInvalidError:
+                    if len(need_relay) == 1:
+                        self._fail_permanently(need_relay, "آیدیِ پیامِ مبدا نامعتبره (احتمالاً حذف شده)")
+                        need_relay = []
+                except (ChannelPrivateError, ValueError) as exc:
+                    self._defer(need_relay, 600, f"اکانت به مبدا {source_peer} یا ربات {owner.label} دسترسی ندارد: {exc}")
+                    need_relay = []
+                except RPCError as exc:
+                    log.warning("خطای تلگرام هنگام انتقال پیام به %s: %s", owner.label, exc)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("خطا هنگام انتقال پیام به %s: %s", owner.label, exc)
+
+                unmapped = []
+                for job in need_relay:
+                    mid = int(job["telegram_message_id"])
+                    if mid in mapping:
+                        plan.setdefault(owner.index, []).append((job, mapping[mid]))
+                    else:
+                        unmapped.append(job)
+                if unmapped:
+                    blocked_until = self._group_flood_until.get(group_id, 0)
+                    delay = max(60, blocked_until - now_ts())
+                    for job in unmapped:
+                        self.db.finish_job(
+                            int(job["id"]),
+                            ok=False,
+                            error="انتقال پیام به پی‌وی ربات انجام نشد؛ دوباره امتحان می‌شود",
+                            run_after=now_ts() + delay,
+                            max_attempts=self.settings.max_job_attempts * 3,
+                        )
+
+        if plan:
+            await asyncio.gather(
+                *(
+                    self._send_with_bot(self.pool.bot_by_index(bot_index), items, chat_id, source_id, dest_peer, group_id)
+                    for bot_index, items in plan.items()
+                )
+            )
+
+    async def _send_with_bot(self, bot: PoolBot, items: list, chat_id: int, source_id: int, dest_peer: str, group_id: int) -> None:
+        assert self.pool is not None
+        jobs = [job for job, _ in items]
+        remaining = self.pool.flood_remaining(bot, chat_id)
+        if remaining > 0:
+            self._defer(jobs, int(remaining) + 1, f"{bot.label} در محدودیت ارسال است؛ ارسال کمی عقب افتاد")
+            return
+        try:
+            await self.pool.forward_from_bot(bot, chat_id, [bot_mid for _, bot_mid in items])
+            for job in jobs:
+                self.db.finish_job(int(job["id"]), ok=True, max_attempts=self.settings.max_job_attempts)
+            log.info("ارسال موفق با %s: گروه %s، %s پیام، مقصد %s", bot.label, group_id, len(jobs), dest_peer)
+        except BotApiError as exc:
+            bot.error_count += 1
+            if exc.is_flood:
+                wait_seconds = int(exc.retry_after or 30) + 1
+                self.pool.set_flood(bot, chat_id, wait_seconds)
+                self._defer(jobs, 2, f"{bot.label} محدودیت {wait_seconds} ثانیه گرفت؛ با ربات دیگر/بعداً ارسال می‌شود")
+                log.warning("429 برای %s در مقصد %s: %s ثانیه", bot.label, dest_peer, wait_seconds)
+            elif exc.is_unauthorized:
+                bot.alive = False
+                self._defer(jobs, 2, f"توکن {bot.label} باطل شده؛ ربات دیگری می‌فرستد")
+                log.error("توکن %s باطل شده؛ از استخر خارج شد.", bot.label)
+            elif exc.is_forbidden:
+                self._bot_blocked[(bot.index, chat_id)] = now_ts() + 3600
+                self._defer(jobs, 2, f"{bot.label} عضو مقصد {dest_peer} نیست یا اجازه‌ی ارسال ندارد؛ ربات دیگری می‌فرستد")
+                log.warning("%s در مقصد %s اجازه‌ی ارسال ندارد (%s)؛ یک ساعت کنار گذاشته شد.", bot.label, dest_peer, exc.description)
+            elif exc.is_message_gone:
+                for job, _ in items:
+                    self.db.delete_relay(source_id, int(job["telegram_message_id"]), bot.index)
+                self._defer(jobs, 2, f"پیام در پی‌وی {bot.label} پیدا نشد؛ دوباره منتقل می‌شود")
+            elif len(items) > 1:
+                mid = len(items) // 2
+                await self._send_with_bot(bot, items[:mid], chat_id, source_id, dest_peer, group_id)
+                await self._send_with_bot(bot, items[mid:], chat_id, source_id, dest_peer, group_id)
+            else:
+                self.db.finish_job(
+                    int(jobs[0]["id"]),
+                    ok=False,
+                    error=f"خطای ربات {bot.label} در ارسال به {dest_peer}: {exc}",
+                    run_after=now_ts() + 120,
+                    max_attempts=self.settings.max_job_attempts,
+                )
+                log.warning("خطای %s در ارسال به %s: %s", bot.label, dest_peer, exc)
+        except Exception as exc:  # noqa: BLE001
+            bot.error_count += 1
+            self._defer(jobs, 30, f"خطای شبکه در ارسال با {bot.label}: {exc}")
+            log.warning("خطای شبکه در ارسال با %s: %s", bot.label, exc)
 
     def _message_date_text(self, value) -> str:
         if value is None:

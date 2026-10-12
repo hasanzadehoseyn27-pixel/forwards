@@ -6,3 +6,4 @@ data/
 logs/
 *.session
 *.session-journal
+bot_tokens.txt

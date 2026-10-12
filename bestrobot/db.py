@@ -140,6 +140,28 @@ class Database:
             updated_at INTEGER NOT NULL
         );
 
+        -- استخر ربات‌ها: هر پیام مبدا یک بار در پی‌وی یک ربات فوروارد می‌شود
+        -- (relay) و شناسه‌ی آن پیام در پی‌وی ربات اینجا نگه داشته می‌شود تا
+        -- ارسال‌های بعدی (و تکراری‌ها) بدون دخالت اکانت انجام شوند.
+        CREATE TABLE IF NOT EXISTS relay_cache (
+            source_id INTEGER NOT NULL,
+            telegram_message_id INTEGER NOT NULL,
+            bot_index INTEGER NOT NULL,
+            bot_message_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(source_id, telegram_message_id, bot_index)
+        );
+
+        -- عضویت ربات‌های استخر در گروه‌های مقصد (برای دستور bots-join)
+        CREATE TABLE IF NOT EXISTS bot_membership (
+            bot_username TEXT NOT NULL,
+            destination_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(bot_username, destination_id)
+        );
+
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -670,6 +692,70 @@ class Database:
             (now_ts(), now_ts()),
         )
         return int(cur.rowcount or 0)
+
+    # ---------------------------------------------------------- bot pool
+
+    def save_relay(self, source_id: int, message_id: int, bot_index: int, bot_message_id: int) -> None:
+        self.execute(
+            """
+            INSERT INTO relay_cache(source_id, telegram_message_id, bot_index, bot_message_id, created_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, telegram_message_id, bot_index)
+            DO UPDATE SET bot_message_id=excluded.bot_message_id, created_at=excluded.created_at
+            """,
+            (source_id, message_id, bot_index, bot_message_id, now_ts()),
+        )
+
+    def get_relays(self, source_id: int, message_ids: list[int]) -> dict[int, list[tuple[int, int]]]:
+        """{telegram_message_id: [(bot_index, bot_message_id), ...]}"""
+        if not message_ids:
+            return {}
+        placeholders = ",".join("?" for _ in message_ids)
+        rows = self.fetchall(
+            f"""
+            SELECT telegram_message_id, bot_index, bot_message_id FROM relay_cache
+            WHERE source_id=? AND telegram_message_id IN ({placeholders})
+            ORDER BY created_at
+            """,
+            (source_id, *message_ids),
+        )
+        result: dict[int, list[tuple[int, int]]] = {}
+        for row in rows:
+            result.setdefault(int(row["telegram_message_id"]), []).append(
+                (int(row["bot_index"]), int(row["bot_message_id"]))
+            )
+        return result
+
+    def delete_relay(self, source_id: int, message_id: int, bot_index: int) -> None:
+        self.execute(
+            "DELETE FROM relay_cache WHERE source_id=? AND telegram_message_id=? AND bot_index=?",
+            (source_id, message_id, bot_index),
+        )
+
+    def purge_old_relays(self, max_age_seconds: int = 3 * 86400) -> int:
+        cur = self.execute("DELETE FROM relay_cache WHERE created_at < ?", (now_ts() - max_age_seconds,))
+        return int(cur.rowcount or 0)
+
+    def all_destinations(self) -> list[sqlite3.Row]:
+        return self.fetchall("SELECT * FROM entities WHERE kind='destination' AND enabled=1 ORDER BY id")
+
+    def get_membership(self, bot_username: str, destination_id: int) -> str | None:
+        row = self.fetchone(
+            "SELECT status FROM bot_membership WHERE bot_username=? AND destination_id=?",
+            (bot_username.lower(), destination_id),
+        )
+        return str(row["status"]) if row else None
+
+    def set_membership(self, bot_username: str, destination_id: int, status: str, note: str = "") -> None:
+        self.execute(
+            """
+            INSERT INTO bot_membership(bot_username, destination_id, status, note, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(bot_username, destination_id)
+            DO UPDATE SET status=excluded.status, note=excluded.note, updated_at=excluded.updated_at
+            """,
+            (bot_username.lower(), destination_id, status, note[:500], now_ts()),
+        )
 
     def complete_scheduled_start(self, schedule_id: int, group_id: int) -> None:
         ts = now_ts()

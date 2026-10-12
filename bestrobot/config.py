@@ -79,6 +79,8 @@ class Settings:
     lock_stale_seconds: int
     watchdog_interval_seconds: int
     watchdog_timeout_seconds: int
+    bot_tokens_file: Path
+    relay_delay_seconds: float
     proxy_type: str | None
     proxy_host: str | None
     proxy_port: int | None
@@ -119,6 +121,8 @@ class Settings:
             lock_stale_seconds=_int("LOCK_STALE_SECONDS", 120),
             watchdog_interval_seconds=_int("WATCHDOG_INTERVAL_SECONDS", 180),
             watchdog_timeout_seconds=_int("WATCHDOG_TIMEOUT_SECONDS", 90),
+            bot_tokens_file=_path(os.getenv("BOT_TOKENS_FILE"), "bot_tokens.txt"),
+            relay_delay_seconds=_float("RELAY_DELAY_SECONDS", 1.0),
             proxy_type=_optional("PROXY_TYPE"),
             proxy_host=_optional("PROXY_HOST"),
             proxy_port=_int("PROXY_PORT", 0) or None,
