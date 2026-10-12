@@ -448,12 +448,15 @@ class ForwardEngine:
     # ------------------------------------------------------------ bot pool
 
     def _dest_uses_pool(self, destination) -> bool:
-        """اگر BOT_POOL_DESTINATIONS خالی باشد همه‌ی مقصدها با ربات‌ها؛ وگرنه فقط همان‌ها
-        (بقیه مثل قبل با خود اکانت)."""
+        """یک مقصد فقط وقتی با ربات‌ها ارسال می‌شود که:
+        ۱) در BOT_POOL_DESTINATIONS باشد (اگر این تنظیم خالی است، همه‌ی مقصدها مجازند)، و
+        ۲) دست‌کم یک ربات با bots-join عضو آن ثبت شده باشد.
+        وگرنه مثل قبل با خود اکانت — تا ربات‌هایی که عضو نیستند بی‌خود امتحان نشوند
+        و اکانت پیام را بی‌جهت به پی‌وی‌شان منتقل نکند."""
         only = self.settings.bot_pool_destinations
-        if not only:
-            return True
-        return normalize_peer(str(destination["peer"])) in only
+        if only and normalize_peer(str(destination["peer"])) not in only:
+            return False
+        return bool(self.db.joined_bots(int(destination["id"])))
 
     async def _destination_chat_id(self, destination) -> int:
         """شناسه‌ی عددی مقصد (مثل -100...) که Bot API می‌فهمد."""
