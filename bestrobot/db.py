@@ -746,6 +746,14 @@ class Database:
         )
         return str(row["status"]) if row else None
 
+    def joined_bots(self, destination_id: int) -> set[str]:
+        """یوزرنیم (حروف کوچک) ربات‌هایی که bots-join عضویتشان در این مقصد را ثبت کرده."""
+        rows = self.fetchall(
+            "SELECT bot_username FROM bot_membership WHERE destination_id=? AND status='joined'",
+            (destination_id,),
+        )
+        return {str(r["bot_username"]).lower() for r in rows}
+
     def set_membership(self, bot_username: str, destination_id: int, status: str, note: str = "") -> None:
         self.execute(
             """

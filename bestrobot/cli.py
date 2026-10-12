@@ -10,7 +10,7 @@ from contextlib import AsyncExitStack
 from telethon import TelegramClient
 
 from .bot_pool import BotPool, load_bot_tokens
-from .config import PROJECT_DIR, Settings
+from .config import PROJECT_DIR, Settings, normalize_peer
 from .db import Database
 from .engine import ForwardEngine
 from .lock import AppLock
@@ -37,6 +37,8 @@ def main() -> None:
     sub.add_parser("bots-start", help="اکانت یک بار به همه‌ی ربات‌های استخر /start می‌دهد")
     join_parser = sub.add_parser("bots-join", help="اکانت ربات‌های استخر را عضو گروه‌های مقصد می‌کند")
     join_parser.add_argument("--delay", type=float, default=4.0, help="فاصله بین هر دعوت (ثانیه)")
+    join_parser.add_argument("--per-dest", type=int, default=15, help="چند ربات در هر گروه مقصد عضو شود")
+    join_parser.add_argument("--dest", default="", help="فقط همین مقصد (مثلاً @K1KHODRO)")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -63,7 +65,7 @@ def main() -> None:
     elif args.command == "bots-start":
         asyncio.run(command_bots_start(settings, db))
     elif args.command == "bots-join":
-        asyncio.run(command_bots_join(settings, db, args.delay))
+        asyncio.run(command_bots_join(settings, db, args.delay, args.per_dest, args.dest))
 
 
 def command_init() -> None:
@@ -288,8 +290,10 @@ async def command_bots_start(settings: Settings, db: Database) -> None:
         await user.disconnect()
 
 
-async def command_bots_join(settings: Settings, db: Database, delay: float) -> None:
-    """ربات‌ها را (به‌عنوان عضو عادی) به همه‌ی گروه‌های مقصد اضافه می‌کند.
+async def command_bots_join(settings: Settings, db: Database, delay: float, per_dest: int = 15, only_dest: str = "") -> None:
+    """در هر گروه مقصد، per_dest ربات را (به‌عنوان عضو عادی) عضو می‌کند — نه همه‌ی
+    ربات‌ها را، چون هر دعوت یک کار اکانت است و دعوت‌های زیاد خودش اکانت را
+    محدود می‌کند. ربات‌ها چرخشی بین مقصدها پخش می‌شوند تا بار یکسان باشد.
     قابل ادامه است: عضویت‌های انجام‌شده ثبت می‌شوند و اجرای دوباره از همان‌جا ادامه می‌دهد."""
     from telethon import functions, types
     from telethon.errors import (
@@ -308,9 +312,16 @@ async def command_bots_join(settings: Settings, db: Database, delay: float) -> N
             return
         try:
             destinations = db.all_destinations()
-            usernames = pool.usernames()
-            print(f"{len(usernames)} ربات و {len(destinations)} گروه مقصد.")
-            for dest in destinations:
+            if only_dest:
+                wanted = normalize_peer(only_dest)
+                destinations = [d for d in destinations if normalize_peer(str(d["peer"])) == wanted]
+                if not destinations:
+                    print(f"مقصد {only_dest} در لیست مقصدهای ربات پیدا نشد (اول از پنل اضافه‌اش کن).")
+                    return
+            all_usernames = pool.usernames()
+            per_dest = max(1, min(per_dest, len(all_usernames)))
+            print(f"{len(all_usernames)} ربات، {len(destinations)} گروه مقصد، {per_dest} ربات در هر گروه.")
+            for dest_no, dest in enumerate(destinations):
                 dest_id = int(dest["id"])
                 peer = str(dest["peer"])
                 try:
@@ -322,9 +333,19 @@ async def command_bots_join(settings: Settings, db: Database, delay: float) -> N
                     print(f"⚠️ {peer} کانال است نه گروه؛ ربات فقط به‌عنوان ادمین می‌تواند عضو کانال شود — رد شد.")
                     continue
                 added = already = failed = 0
+                joined_now = db.joined_bots(dest_id)
+                # ربات‌ها را چرخشی انتخاب می‌کنیم (مقصد ۱: ربات ۱ تا ۱۵، مقصد ۲: ۱۶ تا ۳۰، ...)
+                start = (dest_no * per_dest) % len(all_usernames)
+                rotated = all_usernames[start:] + all_usernames[:start]
+                usernames = [u for u in rotated if u.lower() in joined_now]
+                usernames += [u for u in rotated if u.lower() not in joined_now]
                 for username in usernames:
+                    if added + already >= per_dest:
+                        break
                     if db.get_membership(username, dest_id) == "joined":
                         already += 1
+                        continue
+                    if db.get_membership(username, dest_id) == "failed":
                         continue
                     try:
                         bot_entity = await user.get_input_entity(username)

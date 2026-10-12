@@ -18,7 +18,7 @@ from telethon.errors import (
 from telethon.tl.types import MessageEntityStrike
 
 from .bot_pool import BotApiError, BotPool, PoolBot
-from .config import Settings
+from .config import Settings, normalize_peer
 from .db import Database, now_ts
 
 
@@ -337,7 +337,7 @@ class ForwardEngine:
                 self.db.finish_job(jid, ok=False, error="مبدا یا مقصد حذف شده است", max_attempts=1)
             return
 
-        if self.pool is not None:
+        if self.pool is not None and self._dest_uses_pool(destination):
             await self.send_batch_via_bots(jobs, group_id, source, destination)
             return
 
@@ -447,6 +447,14 @@ class ForwardEngine:
 
     # ------------------------------------------------------------ bot pool
 
+    def _dest_uses_pool(self, destination) -> bool:
+        """اگر BOT_POOL_DESTINATIONS خالی باشد همه‌ی مقصدها با ربات‌ها؛ وگرنه فقط همان‌ها
+        (بقیه مثل قبل با خود اکانت)."""
+        only = self.settings.bot_pool_destinations
+        if not only:
+            return True
+        return normalize_peer(str(destination["peer"])) in only
+
     async def _destination_chat_id(self, destination) -> int:
         """شناسه‌ی عددی مقصد (مثل -100...) که Bot API می‌فهمد."""
         dest_id = int(destination["id"])
@@ -457,21 +465,24 @@ class ForwardEngine:
         self._dest_chat_ids[dest_id] = chat_id
         return chat_id
 
-    def _bot_usable(self, bot: PoolBot | None, chat_id: int) -> bool:
+    def _bot_usable(self, bot: PoolBot | None, chat_id: int, members: set[str] | None = None) -> bool:
         if bot is None or not bot.alive:
+            return False
+        # اگر عضویت ربات‌ها در این مقصد ثبت شده (bots-join)، فقط همان‌ها
+        if members and bot.username.lower() not in members:
             return False
         until = self._bot_blocked.get((bot.index, chat_id), 0)
         return until <= now_ts()
 
-    def _pick_new_owner(self, chat_id: int, exclude: set[int]) -> PoolBot | None:
-        """یک ربات سالم که در این مقصد بلاک نیست؛ اول آن‌هایی که الان در محدودیت 429 نیستند."""
+    def _pick_new_owner(self, chat_id: int, exclude: set[int], members: set[str] | None = None) -> PoolBot | None:
+        """یک ربات سالم و عضو این مقصد که بلاک نیست؛ اول آن‌هایی که الان در محدودیت 429 نیستند."""
         assert self.pool is not None
         candidates = []
         for _ in range(len(self.pool.bots)):
             bot = self.pool.pick_owner()
             if bot is None:
                 return None
-            if bot.index in exclude or not self._bot_usable(bot, chat_id):
+            if bot.index in exclude or not self._bot_usable(bot, chat_id, members):
                 continue
             if self.pool.flood_remaining(bot, chat_id) <= 0:
                 return bot
@@ -509,6 +520,7 @@ class ForwardEngine:
 
         message_ids = [int(j["telegram_message_id"]) for j in jobs]
         holders = self.db.get_relays(source_id, message_ids)
+        members = self.db.joined_bots(int(destination["id"]))
 
         # برای هر job: کدام ربات (و با کدام شناسه‌ی پی‌وی) آن را بفرستد
         plan: dict[int, list[tuple[object, int]]] = {}
@@ -518,7 +530,7 @@ class ForwardEngine:
             choice = None
             for bot_index, bot_mid in holders.get(mid, []):
                 bot = self.pool.bot_by_index(bot_index)
-                if not self._bot_usable(bot, chat_id):
+                if not self._bot_usable(bot, chat_id, members):
                     continue
                 if choice is None or self.pool.flood_remaining(bot, chat_id) < self.pool.flood_remaining(choice[0], chat_id):
                     choice = (bot, bot_mid)
@@ -533,7 +545,7 @@ class ForwardEngine:
                 for job in need_relay
                 for bot_index, _ in holders.get(int(job["telegram_message_id"]), [])
             }
-            owner = self._pick_new_owner(chat_id, exclude)
+            owner = self._pick_new_owner(chat_id, exclude, members)
             if owner is None:
                 self._defer(
                     need_relay,

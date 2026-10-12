@@ -30,6 +30,15 @@ def _path(value: str | None, default: str) -> Path:
     return path
 
 
+def normalize_peer(value: str) -> str:
+    """@K1KHODRO / k1khodro / https://t.me/k1khodro → k1khodro"""
+    v = value.strip().lower()
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/", "@"):
+        if v.startswith(prefix):
+            v = v[len(prefix):]
+    return v.strip("/")
+
+
 def _int(name: str, default: int) -> int:
     value = os.getenv(name)
     return int(value) if value else default
@@ -81,6 +90,7 @@ class Settings:
     watchdog_timeout_seconds: int
     bot_tokens_file: Path
     relay_delay_seconds: float
+    bot_pool_destinations: frozenset[str]
     proxy_type: str | None
     proxy_host: str | None
     proxy_port: int | None
@@ -123,6 +133,9 @@ class Settings:
             watchdog_timeout_seconds=_int("WATCHDOG_TIMEOUT_SECONDS", 90),
             bot_tokens_file=_path(os.getenv("BOT_TOKENS_FILE"), "bot_tokens.txt"),
             relay_delay_seconds=_float("RELAY_DELAY_SECONDS", 1.0),
+            bot_pool_destinations=frozenset(
+                normalize_peer(p) for p in os.getenv("BOT_POOL_DESTINATIONS", "").replace(";", ",").split(",") if p.strip()
+            ),
             proxy_type=_optional("PROXY_TYPE"),
             proxy_host=_optional("PROXY_HOST"),
             proxy_port=_int("PROXY_PORT", 0) or None,
