@@ -299,6 +299,7 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
     from telethon.errors import (
         BotGroupsBlockedError,
         ChatAdminRequiredError,
+        ChatWriteForbiddenError,
         FloodWaitError,
         PeerFloodError,
         UserAlreadyParticipantError,
@@ -333,6 +334,8 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
                     print(f"⚠️ {peer} کانال است نه گروه؛ ربات فقط به‌عنوان ادمین می‌تواند عضو کانال شود — رد شد.")
                     continue
                 added = already = failed = 0
+                # ناموفق‌های اجرای قبلی دوباره امتحان می‌شوند (شاید دسترسی درست شده باشد)
+                db.execute("DELETE FROM bot_membership WHERE destination_id=? AND status='failed'", (dest_id,))
                 joined_now = db.joined_bots(dest_id)
                 # ربات‌ها را چرخشی انتخاب می‌کنیم (مقصد ۱: ربات ۱ تا ۱۵، مقصد ۲: ۱۶ تا ۳۰، ...)
                 start = (dest_no * per_dest) % len(all_usernames)
@@ -374,8 +377,11 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
                         db.set_membership(username, dest_id, "failed", "در BotFather گزینه‌ی Allow Groups خاموش است")
                         failed += 1
                         print(f"   ❌ @{username}: در BotFather گزینه‌ی Allow Groups را روشن کن.")
-                    except ChatAdminRequiredError:
-                        print(f"❌ اکانت در {peer} اجازه‌ی اضافه‌کردن عضو ندارد؛ این گروه رد شد.")
+                    except (ChatAdminRequiredError, ChatWriteForbiddenError):
+                        print(
+                            f"❌ اکانت در {peer} اجازه‌ی اضافه‌کردن عضو ندارد (عضو نیست یا محدود است). "
+                            "اکانت را در آن گروه ادمین کن با دسترسی «Add Members»، بعد دوباره همین دستور را بزن."
+                        )
                         break
                     except FloodWaitError as exc:
                         if exc.seconds > 900:
