@@ -355,6 +355,20 @@ class BotPool:
             await asyncio.sleep(1.5)
         return ok, fail
 
+    async def is_member(self, bot: PoolBot, chat_id: int | str) -> bool | None:
+        """خود ربات با Bot API چک می‌کند عضو این گروه هست و اجازه‌ی ارسال دارد یا نه.
+        None یعنی گروه برای ربات قابل دیدن نیست (عضو نیست یا یوزرنیم اشتباه است)."""
+        try:
+            member = await self._call(bot, "getChatMember", {"chat_id": chat_id, "user_id": bot.bot_id})
+        except BotApiError:
+            return None
+        status = member.get("status")
+        if status in ("administrator", "creator", "member"):
+            return True
+        if status == "restricted":
+            return bool(member.get("is_member")) and member.get("can_send_messages", True) is not False
+        return False
+
     def status_lines(self) -> list[str]:
         lines = []
         for bot in self.bots:

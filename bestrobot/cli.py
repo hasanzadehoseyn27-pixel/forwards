@@ -39,6 +39,11 @@ def main() -> None:
     join_parser.add_argument("--delay", type=float, default=4.0, help="فاصله بین هر دعوت (ثانیه)")
     join_parser.add_argument("--per-dest", type=int, default=15, help="چند ربات در هر گروه مقصد عضو شود")
     join_parser.add_argument("--dest", default="", help="فقط همین مقصد (مثلاً @K1KHODRO)")
+    sync_parser = sub.add_parser(
+        "bots-sync",
+        help="ربات‌ها خودشان چک می‌کنند عضو کدام گروه‌های مقصد هستند و ثبت می‌کنند (برای وقتی که دستی اضافه‌شان کرده‌ای)",
+    )
+    sync_parser.add_argument("--dest", default="", help="فقط همین مقصد (مثلاً K1KHODRO)")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -64,6 +69,8 @@ def main() -> None:
         asyncio.run(command_bots_status(settings, db))
     elif args.command == "bots-start":
         asyncio.run(command_bots_start(settings, db))
+    elif args.command == "bots-sync":
+        asyncio.run(command_bots_sync(settings, db, args.dest))
     elif args.command == "bots-join":
         asyncio.run(command_bots_join(settings, db, args.delay, args.per_dest, args.dest))
 
@@ -301,6 +308,7 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
         ChatAdminRequiredError,
         ChatWriteForbiddenError,
         FloodWaitError,
+        UserBannedInChannelError,
         PeerFloodError,
         UserAlreadyParticipantError,
         UserNotParticipantError,
@@ -377,6 +385,12 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
                         db.set_membership(username, dest_id, "failed", "در BotFather گزینه‌ی Allow Groups خاموش است")
                         failed += 1
                         print(f"   ❌ @{username}: در BotFather گزینه‌ی Allow Groups را روشن کن.")
+                    except UserBannedInChannelError:
+                        print(
+                            "⛔ خود اکانت از طرف تلگرام محدود شده (نمی‌تواند در گروه‌ها پیام بفرستد یا عضو اضافه کند). "
+                            "ربات‌ها را با اکانت خودت دستی به گروه اضافه کن و بعد دستور bots-sync را بزن."
+                        )
+                        return
                     except (ChatAdminRequiredError, ChatWriteForbiddenError):
                         print(
                             f"❌ اکانت در {peer} اجازه‌ی اضافه‌کردن عضو ندارد (عضو نیست یا محدود است). "
@@ -402,6 +416,45 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
             await pool.stop()
     finally:
         await user.disconnect()
+
+
+async def command_bots_sync(settings: Settings, db: Database, only_dest: str = "") -> None:
+    """بدون هیچ کاری از طرف اکانت: هر ربات با getChatMember چک می‌کند عضو
+    کدام گروه مقصد است و نتیجه ثبت می‌شود. وقتی ربات‌ها را دستی (با اکانت
+    دیگری) به گروه اضافه کرده‌ای، این دستور را بزن تا موتور بداند از کدام
+    ربات‌ها برای آن گروه استفاده کند."""
+    tokens = load_bot_tokens(settings.bot_tokens_file)
+    if not tokens:
+        print(f"توکنی در {settings.bot_tokens_file} نیست.")
+        return
+    pool = BotPool(tokens, db, relay_delay_seconds=settings.relay_delay_seconds)
+    await pool.start(0, poll=False)
+    try:
+        destinations = db.all_destinations()
+        if only_dest:
+            wanted = normalize_peer(only_dest)
+            destinations = [d for d in destinations if normalize_peer(str(d["peer"])) == wanted]
+            if not destinations:
+                print(f"مقصد {only_dest} در لیست مقصدهای ربات پیدا نشد.")
+                return
+        bots = [b for b in pool.bots if b.alive]
+        for dest in destinations:
+            dest_id = int(dest["id"])
+            peer = str(dest["peer"]).strip()
+            chat = "@" + normalize_peer(peer) if not peer.lstrip("-").isdigit() else int(peer)
+            results = await asyncio.gather(*(pool.is_member(b, chat) for b in bots))
+            members = []
+            for bot, ok in zip(bots, results):
+                if ok:
+                    db.set_membership(bot.username, dest_id, "joined", "bots-sync")
+                    members.append(bot.username)
+                elif db.get_membership(bot.username, dest_id) == "joined":
+                    db.set_membership(bot.username, dest_id, "left", "bots-sync: دیگر عضو نیست")
+            print(f"{peer}: {len(members)} ربات عضو است.")
+            for name in members:
+                print(f"   ✅ @{name}")
+    finally:
+        await pool.stop()
 
 
 async def wait_forever() -> None:
