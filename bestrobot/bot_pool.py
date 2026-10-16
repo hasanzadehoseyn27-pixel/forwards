@@ -314,10 +314,17 @@ class BotPool:
     # ------------------------------------------------------------------ send
 
     async def forward_from_bot(self, bot: PoolBot, chat_id: int, bot_message_ids: list[int]) -> None:
-        """ربات پیام‌های پی‌وی خودش را در گروه مقصد فوروارد می‌کند (حداکثر ۱۰۰ تا در هر درخواست)."""
-        ids = sorted(set(bot_message_ids))
-        for start in range(0, len(ids), 100):
-            chunk = ids[start : start + 100]
+        """ربات پیام‌های پی‌وی خودش را به همان ترتیبی که داده شده (ترتیب پیام‌های
+        کانال مبدا) در گروه مقصد فوروارد می‌کند. forwardMessages فقط شناسه‌های
+        صعودی را قبول می‌کند (حداکثر ۱۰۰ تا)، پس لیست به تکه‌های صعودیِ پشت‌سرهم
+        شکسته می‌شود — ترتیب نهایی در گروه دقیقاً همان ترتیب مبداست."""
+        runs: list[list[int]] = []
+        for mid in bot_message_ids:
+            if runs and len(runs[-1]) < 100 and mid > runs[-1][-1]:
+                runs[-1].append(mid)
+            else:
+                runs.append([mid])
+        for chunk in runs:
             if len(chunk) == 1:
                 await self._call(
                     bot,
