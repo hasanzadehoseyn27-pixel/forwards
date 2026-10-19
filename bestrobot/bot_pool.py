@@ -376,6 +376,23 @@ class BotPool:
             return bool(member.get("is_member")) and member.get("can_send_messages", True) is not False
         return False
 
+    async def resolve_chat_id(self, chat: int | str) -> int | None:
+        """شناسه‌ی عددی گروه با Bot API (getChat) — بدون نیاز به اکانت.
+        برای یوزرنیم عمومی هر رباتی جواب می‌دهد؛ برای گروه خصوصی فقط ربات عضو."""
+        for bot in self.bots:
+            if not bot.alive:
+                continue
+            try:
+                info = await self._call(bot, "getChat", {"chat_id": chat})
+            except BotApiError:
+                continue
+            except Exception:  # noqa: BLE001
+                continue
+            chat_id = info.get("id") if isinstance(info, dict) else None
+            if chat_id:
+                return int(chat_id)
+        return None
+
     def status_lines(self) -> list[str]:
         lines = []
         for bot in self.bots:

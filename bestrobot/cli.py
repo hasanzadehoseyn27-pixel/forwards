@@ -16,6 +16,7 @@ from .engine import ForwardEngine
 from .lock import AppLock
 from .logging_utils import setup_logging
 from .panel import AdminPanel
+from .transfer import command_export_groups, command_import_groups
 
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,14 @@ def main() -> None:
         help="ربات‌ها خودشان چک می‌کنند عضو کدام گروه‌های مقصد هستند و ثبت می‌کنند (برای وقتی که دستی اضافه‌شان کرده‌ای)",
     )
     sync_parser.add_argument("--dest", default="", help="فقط همین مقصد (مثلاً K1KHODRO)")
+    export_parser = sub.add_parser(
+        "export-groups",
+        help="گروه‌های فوروارد را برای انتقال به سرور دیگر در فایل JSON می‌نویسد (بدون --groups فقط فهرست)",
+    )
+    export_parser.add_argument("--groups", default="", help="شماره‌ی گروه‌ها، مثلاً 3,7")
+    export_parser.add_argument("--out", default="groups-export.json", help="مسیر فایل خروجی")
+    import_parser = sub.add_parser("import-groups", help="گروه‌های فایل JSON را (خاموش) در این ربات می‌سازد")
+    import_parser.add_argument("file", help="فایل خروجیِ export-groups")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -73,6 +82,10 @@ def main() -> None:
         asyncio.run(command_bots_sync(settings, db, args.dest))
     elif args.command == "bots-join":
         asyncio.run(command_bots_join(settings, db, args.delay, args.per_dest, args.dest))
+    elif args.command == "export-groups":
+        asyncio.run(command_export_groups(settings, db, args.groups, args.out))
+    elif args.command == "import-groups":
+        command_import_groups(db, args.file)
 
 
 def command_init() -> None:

@@ -464,7 +464,20 @@ class ForwardEngine:
         cached = self._dest_chat_ids.get(dest_id)
         if cached:
             return cached
-        chat_id = int(await self.client.get_peer_id(str(destination["peer"])))
+        peer = str(destination["peer"]).strip()
+        if peer.lstrip("-").isdigit():
+            # شناسه‌ی عددی (مثلاً -100...) — بدون پرس‌وجو
+            chat_id = int(peer)
+        else:
+            try:
+                chat_id = int(await self.client.get_peer_id(peer))
+            except Exception:  # noqa: BLE001
+                # اکانت این گروه را نمی‌شناسد (مثلاً اکانت تازه که عضو مقصد نیست)
+                # — ربات‌های عضو با getChat شناسه را پیدا می‌کنند
+                resolved = await self.pool.resolve_chat_id("@" + normalize_peer(peer)) if self.pool else None
+                if resolved is None:
+                    raise
+                chat_id = resolved
         self._dest_chat_ids[dest_id] = chat_id
         return chat_id
 
