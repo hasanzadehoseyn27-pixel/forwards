@@ -1,8 +1,8 @@
-"""ربات‌های یک بازه را از bot_tokens.txt این سرور جدا می‌کند تا به سرور دیگر منتقل شوند.
+"""ربات‌های انتخابی را از bot_tokens.txt این سرور جدا می‌کند تا به سرور دیگر منتقل شوند.
 
-    python tools/split_bot_tokens.py 20 28
+    python tools/split_bot_tokens.py 12-15,26-30
 
-- توکن ربات‌های شماره‌ی 20 تا 28 (همان شماره‌هایی که bots-status نشان می‌دهد)
+- توکن ربات‌های این شماره‌ها (همان شماره‌ی ردیفی که bots-status جلوی هر ربات نشان می‌دهد)
   در فایل moved_bot_tokens.txt نوشته می‌شود (برای کپی به سرور جدید).
 - در bot_tokens.txt به‌جای هر کدام یک خط «جانگه‌دار» گذاشته می‌شود تا شماره‌ی
   بقیه‌ی ربات‌ها عوض نشود (ربات جانگه‌دار خودکار «خراب» حساب و کنار گذاشته می‌شود).
@@ -33,11 +33,24 @@ def token_of(raw: str) -> str | None:
     return line
 
 
+def parse_indexes(raw: str) -> set[int]:
+    wanted: set[int] = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            wanted.update(range(int(a), int(b) + 1))
+        else:
+            wanted.add(int(part))
+    return wanted
+
+
 def main() -> None:
-    if len(sys.argv) != 3:
-        print("استفاده: python tools/split_bot_tokens.py 20 28")
+    if len(sys.argv) != 2:
+        print("استفاده: python tools/split_bot_tokens.py 12-15,26-30")
         sys.exit(1)
-    first, last = int(sys.argv[1]), int(sys.argv[2])
+    wanted = parse_indexes(sys.argv[1])
     path = PROJECT_DIR / "bot_tokens.txt"
     lines = path.read_text(encoding="utf-8").splitlines()
 
@@ -52,13 +65,13 @@ def main() -> None:
             continue
         seen.add(tok)
         index += 1
-        if first <= index <= last:
+        if index in wanted:
             moved.append(tok)
             out_lines.append(f"0:moved-to-other-server-bot-{index}  # منتقل شد")
         else:
             out_lines.append(raw)
 
-    if len(moved) != last - first + 1:
+    if len(moved) != len(wanted):
         print(f"فقط {len(moved)} ربات در این بازه پیدا شد؛ هیچ تغییری داده نشد.")
         sys.exit(1)
 
@@ -66,7 +79,7 @@ def main() -> None:
     shutil.copyfile(path, backup)
     (PROJECT_DIR / "moved_bot_tokens.txt").write_text("\n".join(moved) + "\n", encoding="utf-8")
     path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    print(f"{len(moved)} ربات (شماره‌ی {first} تا {last}) جدا شد.")
+    print(f"{len(moved)} ربات (شماره‌های {sys.argv[1]}) جدا شد.")
     print(f"پشتیبان: {backup.name}")
     print("فایل برای سرور جدید: moved_bot_tokens.txt")
 
