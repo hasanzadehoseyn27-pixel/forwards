@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import ssl
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,19 @@ from pathlib import Path
 import aiohttp
 
 from .db import Database
+
+
+def _tls_context() -> ssl.SSLContext:
+    """گواهی‌ها با «مخزن گواهی خود ویندوز» چک می‌شوند (مثل مرورگر و curl).
+    روی سرورهایی که یک آنتی‌ویروس/فایروال گواهی ریشه‌ی خودش را به ویندوز
+    اضافه کرده، پایتون به‌تنهایی آن را نمی‌شناسد و خطای self-signed می‌دهد.
+    چک‌کردن گواهی خاموش نمی‌شود — فقط منبع اعتماد همان منبع سیستم‌عامل است."""
+    try:
+        import truststore
+
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:  # noqa: BLE001 — truststore نصب نیست: رفتار پیش‌فرض پایتون
+        return ssl.create_default_context()
 
 
 log = logging.getLogger(__name__)
@@ -149,7 +163,10 @@ class BotPool:
     async def start(self, account_id: int, poll: bool = True) -> None:
         self.account_id = int(account_id)
         timeout = aiohttp.ClientTimeout(total=70)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        self.session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=aiohttp.TCPConnector(ssl=_tls_context()),
+        )
 
         async def init_one(bot: PoolBot) -> None:
             try:
