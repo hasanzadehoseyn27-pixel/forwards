@@ -1,7 +1,8 @@
 module.exports = {
   apps: [
     {
-      name: "forwardsbot",
+      // اسم PM2 قابل تغییر: $env:PM2_NAME="k1ads"; pm2 start ecosystem.config.js
+      name: process.env.PM2_NAME || "forwardsbot",
       cwd: __dirname,
       script: ".venv/Scripts/python.exe",
       args: "-m bestrobot run",
