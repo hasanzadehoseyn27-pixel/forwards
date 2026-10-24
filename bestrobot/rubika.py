@@ -543,11 +543,13 @@ class RubikaBotPool(BotPool):
                 log.info("%s در %s: %s (%s)", bot.label, upd.get("chat_id"), ev.get("type"), ev.get("join_type") or "")
             return None
         msg = upd.get("new_message") or {}
-        sender = str(msg.get("sender_id") or "")
         chat_id = str(upd.get("chat_id") or "")
-        if self.account_guid and sender != self.account_guid:
-            return None
         if not chat_id.startswith("b0"):
+            return None
+        # نکته: در Bot API روبیکا sender_id اکانت از دید هر ربات فرق دارد و با
+        # guid خود اکانت (u0...) یکی نیست؛ پس با فرستنده فیلتر نمی‌کنیم. فقط
+        # پیام‌های «فورواردشده» relay حساب می‌شوند (کاری که فقط اکانت می‌کند).
+        if not msg.get("forwarded_from"):
             return None
         self._remember_pm(bot, chat_id)
         return msg
