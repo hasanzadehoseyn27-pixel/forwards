@@ -1,10 +1,18 @@
+const fs = require("fs");
+const path = require("path");
+
+// پوشه‌ی venv می‌تواند .venv یا venv باشد
+const python = [".venv", "venv"]
+  .map((d) => path.join(d, "Scripts", "python.exe"))
+  .find((p) => fs.existsSync(path.join(__dirname, p))) || ".venv/Scripts/python.exe";
+
 module.exports = {
   apps: [
     {
       // اسم PM2 قابل تغییر: $env:PM2_NAME="k1ads"; pm2 start ecosystem.config.js
       name: process.env.PM2_NAME || "forwardsbot",
       cwd: __dirname,
-      script: ".venv/Scripts/python.exe",
+      script: python,
       args: "-m bestrobot run",
       interpreter: "none",
       autorestart: true,

@@ -24,3 +24,6 @@ def setup_logging(settings: Settings) -> None:
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     root.addHandler(console)
+
+    # rubpy در سطح INFO کل اطلاعات سشن (auth و کلید خصوصی) را چاپ می‌کند؛ نباید در لاگ بیاید
+    logging.getLogger("rubpy").setLevel(logging.WARNING)

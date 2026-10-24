@@ -697,6 +697,11 @@ def match_relayed(delivered: list[int], received: list[dict]) -> dict[int, int]:
             src = int(fwd.get("message_id"))
         except (TypeError, ValueError):
             src = None
+        if src is not None and src not in wanted:
+            # Bot API گاهی همان شناسه را با چند رقم اضافه در انتها می‌دهد
+            # (مثلاً 1950023074621770 ← 1950023074621770017)
+            s = str(src)
+            src = next((w for w in wanted if w not in mapping and s.startswith(str(w)) and len(s) - len(str(w)) <= 4), src)
         if src is not None and src in wanted and src not in mapping:
             mapping[src] = bot_mid
         else:
