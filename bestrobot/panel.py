@@ -645,8 +645,11 @@ class AdminPanel:
             label = f"{state} {display_entity_label(row)}"
             peer = str(row["peer"]).strip()
             username = peer.lstrip("@").strip()
-            if username and "/" not in username and username.replace("_", "").isalnum():
-                link_button = Button.url(label, f"https://t.me/{username}")
+            if peer.startswith("https://"):
+                link_button = Button.url(label, peer)
+            elif username and "/" not in username and username.replace("_", "").isalnum() and not username.startswith(("c0", "g0")):
+                host = "rubika.ir" if self.settings.is_rubika else "t.me"
+                link_button = Button.url(label, f"https://{host}/{username}")
             else:
                 link_button = Button.inline(label, b"noop")
             rows.append([link_button, Button.inline("🗑", f"eldel|{kind}|{entity_id}|{page}".encode())])

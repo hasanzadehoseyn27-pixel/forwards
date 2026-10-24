@@ -458,13 +458,18 @@ class ForwardEngine:
             return False
         return bool(self.db.joined_bots(int(destination["id"])))
 
-    async def _destination_chat_id(self, destination) -> int:
-        """شناسه‌ی عددی مقصد (مثل -100...) که Bot API می‌فهمد."""
+    async def _destination_chat_id(self, destination) -> int | str:
+        """شناسه‌ی عددی مقصد (مثل -100...) که Bot API می‌فهمد.
+        در روبیکا: guid گروه (g0...)."""
         dest_id = int(destination["id"])
         cached = self._dest_chat_ids.get(dest_id)
         if cached:
             return cached
         peer = str(destination["peer"]).strip()
+        if self.settings.is_rubika:
+            chat_id = str(await self.client.get_peer_id(peer))
+            self._dest_chat_ids[dest_id] = chat_id
+            return chat_id
         if peer.lstrip("-").isdigit():
             # شناسه‌ی عددی (مثلاً -100...) — بدون پرس‌وجو
             chat_id = int(peer)
@@ -720,6 +725,9 @@ class ForwardEngine:
             return False
 
     def _has_strike(self, message) -> bool:
+        flag = getattr(message, "has_strike", None)
+        if isinstance(flag, bool):
+            return flag
         try:
             entities = message.entities or []
             return any(isinstance(e, MessageEntityStrike) for e in entities)

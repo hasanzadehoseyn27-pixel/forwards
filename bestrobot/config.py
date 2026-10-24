@@ -91,6 +91,9 @@ class Settings:
     bot_tokens_file: Path
     relay_delay_seconds: float
     bot_pool_destinations: frozenset[str]
+    platform: str
+    rubika_session: Path
+    rubika_phone: str | None
     proxy_type: str | None
     proxy_host: str | None
     proxy_port: int | None
@@ -111,6 +114,9 @@ class Settings:
             raise RuntimeError(f"تنظیمات ناقص است. این مقدارها در .env نیستند: {joined}")
 
         instance = os.getenv("INSTANCE_NAME", "bestrobot").strip() or "bestrobot"
+        platform = (os.getenv("PLATFORM", "telegram").strip().lower() or "telegram")
+        if platform not in ("telegram", "rubika"):
+            raise RuntimeError("PLATFORM در .env باید telegram یا rubika باشد")
         return cls(
             api_id=int(os.environ["API_ID"]),
             api_hash=os.environ["API_HASH"],
@@ -136,12 +142,19 @@ class Settings:
             bot_pool_destinations=frozenset(
                 normalize_peer(p) for p in os.getenv("BOT_POOL_DESTINATIONS", "").replace(";", ",").split(",") if p.strip()
             ),
+            platform=platform,
+            rubika_session=_path(os.getenv("RUBIKA_SESSION"), f"data/{instance}-rubika"),
+            rubika_phone=_optional("RUBIKA_PHONE"),
             proxy_type=_optional("PROXY_TYPE"),
             proxy_host=_optional("PROXY_HOST"),
             proxy_port=_int("PROXY_PORT", 0) or None,
             proxy_username=_optional("PROXY_USERNAME"),
             proxy_password=_optional("PROXY_PASSWORD"),
         )
+
+    @property
+    def is_rubika(self) -> bool:
+        return self.platform == "rubika"
 
     def telethon_proxy(self) -> Any | None:
         if not self.proxy_host or not self.proxy_port:

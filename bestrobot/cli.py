@@ -53,6 +53,9 @@ def main() -> None:
     export_parser.add_argument("--out", default="groups-export.json", help="مسیر فایل خروجی")
     import_parser = sub.add_parser("import-groups", help="گروه‌های فایل JSON را (خاموش) در این ربات می‌سازد")
     import_parser.add_argument("file", help="فایل خروجیِ export-groups")
+    probe_parser = sub.add_parser("rubika-probe", help="(روبیکا) چند پیام آخر یک مبدا را نشان می‌دهد تا خواندن پیام‌ها چک شود")
+    probe_parser.add_argument("peer", help="یوزرنیم کانال یا لینک گروه/کانال")
+    probe_parser.add_argument("--limit", type=int, default=5)
 
     args = parser.parse_args()
     if args.command == "init":
@@ -86,6 +89,8 @@ def main() -> None:
         asyncio.run(command_export_groups(settings, db, args.groups, args.out))
     elif args.command == "import-groups":
         command_import_groups(db, args.file)
+    elif args.command == "rubika-probe":
+        asyncio.run(command_rubika_probe(settings, args.peer, args.limit))
 
 
 def command_init() -> None:
@@ -105,6 +110,9 @@ def command_init() -> None:
 
 
 async def command_login(settings: Settings) -> None:
+    if settings.is_rubika:
+        await command_login_rubika(settings)
+        return
     print("ورود اکانت تلگرام شروع شد. شماره، کد و در صورت نیاز رمز دو مرحله‌ای را وارد کن.")
     client = TelegramClient(
         str(settings.user_session),
@@ -119,6 +127,44 @@ async def command_login(settings: Settings) -> None:
     await client.disconnect()
     print(f"سشن ذخیره شد: {settings.user_session}")
     print(f"اکانت فعال: {getattr(me, 'first_name', '')} ({me.id})")
+
+
+async def command_login_rubika(settings: Settings) -> None:
+    from rubpy import Client
+
+    phone = settings.rubika_phone or input("شماره‌ی روبیکا (مثلاً 0919...): ").strip()
+    print(f"ورود اکانت روبیکا با {phone} شروع شد. کد پیامک‌شده (و اگر خواست، رمز دو مرحله‌ای) را وارد کن.")
+    client = Client(name=str(settings.rubika_session))
+    await client.start(phone_number=phone)
+    me = await client.get_me()
+    user = me.user if me is not None else None
+    await client.disconnect()
+    print(f"سشن روبیکا ذخیره شد: {settings.rubika_session}.rp")
+    if user is not None:
+        print(f"اکانت فعال: {user.first_name or ''} ({user.user_guid})")
+
+
+async def command_rubika_probe(settings: Settings, peer: str, limit: int) -> None:
+    if not settings.is_rubika:
+        print("این دستور فقط وقتی PLATFORM=rubika است کار می‌کند.")
+        return
+    user = await start_user(settings)
+    try:
+        guid = await user.get_peer_id(peer)
+        entity = await user.get_entity(peer)
+        print(f"{peer} → {guid}  «{entity.title or ''}»")
+        msgs = await user.get_messages(peer, limit=limit)
+        print(f"{len(msgs)} پیام آخر (جدید به قدیم):")
+        for m in msgs:
+            text = (m.text or "").replace("\n", " ")[:60]
+            kind = "استیکر/سیستمی" if m.sticker is not None else "عادی"
+            print(f"  {m.id} | {m.date} | {kind} | خط‌خورده={m.has_strike} | {text}")
+        if msgs:
+            older = msgs[-1].id
+            newer = [m async for m in user.iter_messages(peer, min_id=older, reverse=True)]
+            print(f"پیام‌های جدیدتر از {older}: {len(newer)} تا (باید {len(msgs) - 1} باشد)")
+    finally:
+        await user.disconnect()
 
 
 async def command_run(settings: Settings, db: Database, force_lock: bool) -> None:
@@ -226,6 +272,14 @@ async def start_bot(settings: Settings) -> TelegramClient:
 
 
 async def start_user(settings: Settings) -> TelegramClient:
+    if settings.is_rubika:
+        from .rubika import RubikaAccount
+
+        account = RubikaAccount(settings.rubika_session)
+        await account.connect()
+        me = await account.get_me()
+        log.info("اکانت روبیکا وصل شد: %s (%s)", me.first_name or me.username, me.id)
+        return account  # type: ignore[return-value]
     user = TelegramClient(
         str(settings.user_session),
         settings.api_id,
@@ -254,13 +308,13 @@ async def try_start_user(settings: Settings) -> TelegramClient | None:
 async def start_pool(settings: Settings, db: Database, user: TelegramClient, poll: bool = True) -> BotPool | None:
     """اگر bot_tokens.txt توکن داشته باشد، ارسال در مقصدها با ربات‌ها انجام می‌شود؛
     وگرنه همان روش قبلی (فوروارد مستقیم با اکانت) می‌ماند."""
-    tokens = load_bot_tokens(settings.bot_tokens_file)
+    tokens = load_tokens(settings)
     if not tokens:
         log.info("فایل %s توکنی ندارد؛ ارسال مثل قبل با خود اکانت انجام می‌شود.", settings.bot_tokens_file)
         return None
-    pool = BotPool(tokens, db, relay_delay_seconds=settings.relay_delay_seconds)
+    pool = make_pool(settings, db, tokens)
     me = await user.get_me()
-    await pool.start(int(me.id), poll=poll)
+    await pool.start(me.id, poll=poll)
     if not pool.enabled:
         log.error("هیچ‌کدام از ربات‌های %s کار نکرد؛ ارسال مثل قبل با خود اکانت انجام می‌شود.", settings.bot_tokens_file)
         await pool.stop()
@@ -269,8 +323,29 @@ async def start_pool(settings: Settings, db: Database, user: TelegramClient, pol
     return pool
 
 
+def load_tokens(settings: Settings) -> list[str]:
+    if settings.is_rubika:
+        from .rubika import load_rubika_tokens
+
+        return load_rubika_tokens(settings.bot_tokens_file)
+    return load_bot_tokens(settings.bot_tokens_file)
+
+
+def make_pool(settings: Settings, db: Database, tokens: list[str]) -> BotPool:
+    if settings.is_rubika:
+        from .rubika import RubikaBotPool
+
+        return RubikaBotPool(
+            tokens,
+            db,
+            relay_delay_seconds=settings.relay_delay_seconds,
+            state_path=settings.data_dir / f"{settings.instance_name}-rubika-bots.json",
+        )
+    return BotPool(tokens, db, relay_delay_seconds=settings.relay_delay_seconds)
+
+
 async def command_bots_status(settings: Settings, db: Database) -> None:
-    tokens = load_bot_tokens(settings.bot_tokens_file)
+    tokens = load_tokens(settings)
     if not tokens:
         print(f"توکنی در {settings.bot_tokens_file} نیست.")
         return
@@ -288,7 +363,10 @@ async def command_bots_status(settings: Settings, db: Database) -> None:
                     print(f"❌ {bot.index}. (توکن کار نمی‌کند)")
                     continue
                 joined = sum(1 for d in destinations if db.get_membership(bot.username, int(d["id"])) == "joined")
-                print(f"✅ {bot.index}. @{bot.username} — عضو {joined} از {len(destinations)} مقصد")
+                extra = ""
+                if settings.is_rubika:
+                    extra = " — پی‌وی اکانت: " + ("شناخته‌شده ✅" if getattr(bot, "pm_chat_id", "") else "هنوز ناشناخته (با اولین ارسال یاد گرفته می‌شود)")
+                print(f"✅ {bot.index}. @{bot.username} — عضو {joined} از {len(destinations)} مقصد{extra}")
         finally:
             await pool.stop()
     finally:
@@ -327,6 +405,9 @@ async def command_bots_join(settings: Settings, db: Database, delay: float, per_
         UserNotParticipantError,
     )
 
+    if settings.is_rubika:
+        print("در روبیکا ربات‌ها را خودت ادمین گروه کن، بعد دستور bots-sync را بزن.")
+        return
     user = await start_user(settings)
     try:
         pool = await start_pool(settings, db, user, poll=False)
@@ -436,6 +517,9 @@ async def command_bots_sync(settings: Settings, db: Database, only_dest: str = "
     کدام گروه مقصد است و نتیجه ثبت می‌شود. وقتی ربات‌ها را دستی (با اکانت
     دیگری) به گروه اضافه کرده‌ای، این دستور را بزن تا موتور بداند از کدام
     ربات‌ها برای آن گروه استفاده کند."""
+    if settings.is_rubika:
+        await command_bots_sync_rubika(settings, db, only_dest)
+        return
     tokens = load_bot_tokens(settings.bot_tokens_file)
     if not tokens:
         print(f"توکنی در {settings.bot_tokens_file} نیست.")
@@ -466,6 +550,36 @@ async def command_bots_sync(settings: Settings, db: Database, only_dest: str = "
             print(f"{peer}: {len(members)} ربات عضو است.")
             for name in members:
                 print(f"   ✅ @{name}")
+    finally:
+        await pool.stop()
+
+
+async def command_bots_sync_rubika(settings: Settings, db: Database, only_dest: str = "") -> None:
+    """Bot API روبیکا راهی برای چک عضویت ندارد؛ همه‌ی ربات‌های سالم برای همه‌ی
+    مقصدها «عضو» ثبت می‌شوند (تو خودت ادمینشان کرده‌ای). اگر رباتی واقعاً
+    ادمین نباشد، موتور با اولین خطای INVALID_ACCESS یک ساعت کنارش می‌گذارد و
+    ربات دیگری می‌فرستد."""
+    tokens = load_tokens(settings)
+    if not tokens:
+        print(f"توکنی در {settings.bot_tokens_file} نیست.")
+        return
+    pool = make_pool(settings, db, tokens)
+    await pool.start("", poll=False)
+    try:
+        destinations = db.all_destinations()
+        if only_dest:
+            destinations = [d for d in destinations if str(d["peer"]).strip() == only_dest.strip()]
+            if not destinations:
+                print(f"مقصد {only_dest} در لیست مقصدهای ربات پیدا نشد.")
+                return
+        bots = [b for b in pool.bots if b.alive and b.username]
+        for dest in destinations:
+            dest_id = int(dest["id"])
+            for bot in bots:
+                db.set_membership(bot.username, dest_id, "joined", "bots-sync (روبیکا)")
+            print(f"{dest['peer']}: {len(bots)} ربات ثبت شد.")
+            for bot in bots:
+                print(f"   ✅ @{bot.username}")
     finally:
         await pool.stop()
 
