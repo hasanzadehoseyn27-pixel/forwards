@@ -191,6 +191,7 @@ class RubikaAccount:
         try:
             result = await self.client.builder(method, input=data, dict=True)
         except exceptions.TooRequests as exc:
+            log.warning("روبیکا برای %s خطای TOO_REQUESTS داد: %s", method, getattr(exc, "dev_message", "") or exc)
             raise _flood_error(60) from exc
         return result or {}
 
@@ -593,7 +594,7 @@ class RubikaBotPool(BotPool):
 
     async def relay(self, client, source_peer: str, message_ids: list[int], source_id: int, bot: PoolBot) -> dict[int, int]:
         assert isinstance(bot, RubikaPoolBot)
-        if not message_ids or not bot.bot_guid:
+        if not message_ids or not (bot.username or bot.bot_guid):
             return {}
         message_ids = sorted(set(int(m) for m in message_ids))
         async with bot.relay_lock:
@@ -603,7 +604,10 @@ class RubikaBotPool(BotPool):
                 wait = self.relay_delay_seconds - (time.monotonic() - self._last_relay_at)
                 if wait > 0:
                     await asyncio.sleep(wait)
-                result = await client.forward_messages(entity=bot.bot_guid, messages=message_ids, from_peer=source_peer)
+                # نکته: bot_id که Bot API می‌دهد از دید اکانت معتبر نیست (guidها برای هر
+                # طرف فرق دارند)؛ اکانت ربات را با یوزرنیمش پیدا می‌کند.
+                target = "@" + bot.username if bot.username else bot.bot_guid
+                result = await client.forward_messages(entity=target, messages=message_ids, from_peer=source_peer)
                 self._last_relay_at = time.monotonic()
             if not isinstance(result, list):
                 result = [result]
@@ -654,10 +658,10 @@ class RubikaBotPool(BotPool):
     async def send_start_to_all(self, client) -> tuple[int, int]:
         ok = fail = 0
         for bot in self.bots:
-            if not bot.alive or not getattr(bot, "bot_guid", ""):
+            if not bot.alive or not bot.username:
                 continue
             try:
-                await client.send_message(bot.bot_guid, "/start")
+                await client.send_message("@" + bot.username, "/start")
                 ok += 1
             except Exception as exc:  # noqa: BLE001
                 fail += 1
