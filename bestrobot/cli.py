@@ -257,6 +257,12 @@ async def command_engine(settings: Settings, db: Database, force_lock: bool) -> 
 
 
 async def start_bot(settings: Settings) -> TelegramClient:
+    if settings.is_rubika:
+        from .rubika_panel import RubikaPanelBot
+
+        panel_bot = RubikaPanelBot(settings.bot_token)
+        await panel_bot.start()
+        return panel_bot  # type: ignore[return-value]
     bot = TelegramClient(
         str(settings.bot_session),
         settings.api_id,

@@ -52,6 +52,10 @@ class AdminPanel:
         self.forward_client = forward_client
 
     def register(self) -> None:
+        if hasattr(self.bot, "attach_panel"):
+            # پنل روبیکا (rubika_panel.RubikaPanelBot)
+            self.bot.attach_panel(self)
+            return
         self.bot.add_event_handler(self.on_start, events.NewMessage(pattern=r"^/start$"))
         self.bot.add_event_handler(self.on_cancel, events.NewMessage(pattern=r"^/cancel$"))
         self.bot.add_event_handler(self.on_text, events.NewMessage)
@@ -435,12 +439,13 @@ class AdminPanel:
         await event.respond(self.main_text(), buttons=self.main_buttons())
 
     async def ensure_admin(self, event) -> bool:
-        sender_id = int(event.sender_id or 0)
+        guid = getattr(event, "sender_guid", None)
+        sender_id = guid if guid else int(event.sender_id or 0)
         if not self.settings.admin_ids:
-            await event.respond("ADMIN_IDS در فایل .env تنظیم نشده است.")
+            await event.respond(f"ADMIN_IDS در فایل .env تنظیم نشده است.\nآیدی شما: {sender_id}")
             return False
         if sender_id not in self.settings.admin_ids:
-            await event.respond("شما دسترسی مدیریت ندارید.")
+            await event.respond(f"شما دسترسی مدیریت ندارید.\nآیدی شما: {sender_id}")
             return False
         return True
 
@@ -605,7 +610,8 @@ class AdminPanel:
         total = len(self.db.list_entities(kind))
         if not total:
             return f"{label}\nهنوز چیزی ثبت نشده."
-        return f"{label} (مجموع {total})\nروی نام بزن تا خودِ کانال/گروه در تلگرام باز شود؛ روی 🗑 بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
+        app = "روبیکا" if self.settings.is_rubika else "تلگرام"
+        return f"{label} (مجموع {total})\nروی نام بزن تا خودِ کانال/گروه در {app} باز شود؛ روی 🗑 بزن تا کامل حذف شود (از همه گروه‌ها هم جدا می‌شود)."
 
     def banned_words_text(self, group_id: int) -> str:
         words = self.db.list_banned_words(group_id)

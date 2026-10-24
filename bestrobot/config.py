@@ -57,13 +57,14 @@ def _optional(name: str) -> str | None:
     return value or None
 
 
-def _admin_ids() -> set[int]:
+def _admin_ids() -> set:
+    """آیدی عددی تلگرام، یا guid روبیکا (مثل u0...)."""
     raw = os.getenv("ADMIN_IDS", "")
-    ids: set[int] = set()
+    ids: set = set()
     for part in raw.replace(";", ",").split(","):
         part = part.strip()
         if part:
-            ids.add(int(part))
+            ids.add(int(part) if part.lstrip("-").isdigit() else part)
     return ids
 
 
@@ -108,18 +109,20 @@ class Settings:
         data_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        missing = [name for name in ("API_ID", "API_HASH", "BOT_TOKEN") if not os.getenv(name)]
+        platform = (os.getenv("PLATFORM", "telegram").strip().lower() or "telegram")
+        if platform not in ("telegram", "rubika"):
+            raise RuntimeError("PLATFORM در .env باید telegram یا rubika باشد")
+        # روبیکا کاملاً جداست: پنل هم ربات روبیکاست، پس API_ID/API_HASH لازم نیست
+        required = ("BOT_TOKEN",) if platform == "rubika" else ("API_ID", "API_HASH", "BOT_TOKEN")
+        missing = [name for name in required if not os.getenv(name)]
         if missing:
             joined = ", ".join(missing)
             raise RuntimeError(f"تنظیمات ناقص است. این مقدارها در .env نیستند: {joined}")
 
         instance = os.getenv("INSTANCE_NAME", "bestrobot").strip() or "bestrobot"
-        platform = (os.getenv("PLATFORM", "telegram").strip().lower() or "telegram")
-        if platform not in ("telegram", "rubika"):
-            raise RuntimeError("PLATFORM در .env باید telegram یا rubika باشد")
         return cls(
-            api_id=int(os.environ["API_ID"]),
-            api_hash=os.environ["API_HASH"],
+            api_id=int(os.getenv("API_ID") or 0),
+            api_hash=os.getenv("API_HASH", ""),
             bot_token=os.environ["BOT_TOKEN"],
             admin_ids=_admin_ids(),
             instance_name=instance,
