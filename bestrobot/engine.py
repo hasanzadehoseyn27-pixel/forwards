@@ -680,6 +680,14 @@ class ForwardEngine:
                 self._bot_blocked[(bot.index, chat_id)] = now_ts() + 3600
                 self._defer(jobs, 2, f"{bot.label} عضو مقصد {dest_peer} نیست یا اجازه‌ی ارسال ندارد؛ ربات دیگری می‌فرستد")
                 log.warning("%s در مقصد %s اجازه‌ی ارسال ندارد (%s)؛ یک ساعت کنار گذاشته شد.", bot.label, dest_peer, exc.description)
+            elif exc.is_content_forbidden and len(items) == 1:
+                # مثلاً CHAT_SEND_WEBPAGE_FORBIDDEN: گروه لینک/پیش‌نمایش را بسته؛
+                # قبلاً هر ۲ دقیقه بی‌نهایت دوباره امتحان می‌شد
+                self._fail_permanently(
+                    jobs,
+                    f"گروه {dest_peer} این نوع پیام را اجازه نمی‌دهد ({exc.description}) — در تنظیمات گروه دسترسی را باز کن",
+                )
+                log.warning("%s: گروه %s این پیام را قبول نمی‌کند (%s)؛ دیگر تلاش نمی‌شود.", bot.label, dest_peer, exc.description)
             elif exc.is_message_gone:
                 for job, _ in items:
                     self.db.delete_relay(source_id, int(job["telegram_message_id"]), bot.index)

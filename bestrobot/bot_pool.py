@@ -112,6 +112,13 @@ class BotApiError(Exception):
         )
 
     @property
+    def is_content_forbidden(self) -> bool:
+        """گروه مقصد این نوع محتوا را برای ربات‌ها بسته (مثلاً لینک/پیش‌نمایش، عکس، ویدیو).
+        تلاش دوباره فایده ندارد؛ فقط با باز کردن همان دسترسی در تنظیمات گروه درست می‌شود."""
+        d = self.description.upper()
+        return self.code == 400 and "CHAT_SEND_" in d and "_FORBIDDEN" in d
+
+    @property
     def is_unauthorized(self) -> bool:
         return self.code == 401
 
@@ -297,14 +304,18 @@ class BotPool:
 
             if not isinstance(result, list):
                 result = [result]
-            # پیام‌هایی که واقعاً فوروارد شدند (None یعنی آن یکی فوروارد نشد)
+            # پیام‌هایی که واقعاً فوروارد شدند (None یعنی Telethon نتوانست جواب را
+            # به پیام وصل کند). نکته: «missing message mappings» یعنی تلگرام
+            # پیام‌ها را فوروارد کرده ولی جوابش ناقص بوده؛ قبلاً این را «فوروارد
+            # نشد» حساب می‌کردیم و همان پیام‌ها را دقیقه‌ای چند بار دوباره به
+            # پی‌وی ربات می‌فرستادیم ← اکانت FloodWait یک‌ساعته می‌گرفت.
             delivered = [mid for mid, res in zip(message_ids, result) if res is not None]
-            if not delivered:
-                return {}
+            unsure = not delivered
+            expected = message_ids if unsure else delivered
 
             received: list[dict] = []
-            deadline = time.monotonic() + 30
-            while len(received) < len(delivered):
+            deadline = time.monotonic() + (15 if unsure else 30)
+            while len(received) < len(expected):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -313,17 +324,14 @@ class BotPool:
                 except asyncio.TimeoutError:
                     break
 
-            if len(received) != len(delivered):
+            mapping = match_forwarded(expected, received)
+            if len(mapping) != len(expected):
                 log.warning(
-                    "relay به %s: %s پیام فرستاده شد ولی %s تا رسید؛ این دسته دوباره امتحان می‌شود.",
+                    "relay به %s: %s پیام فرستاده شد ولی %s تا شناسایی شد؛ بقیه دوباره امتحان می‌شوند.",
                     bot.label,
-                    len(delivered),
-                    len(received),
+                    len(expected),
+                    len(mapping),
                 )
-                return {}
-
-            received.sort(key=lambda m: int(m["message_id"]))
-            mapping = {src: int(m["message_id"]) for src, m in zip(delivered, received)}
             for src, bot_mid in mapping.items():
                 self.db.save_relay(source_id, src, bot.index, bot_mid)
             return mapping
@@ -417,3 +425,37 @@ class BotPool:
             lines.append(f"{state} {bot.index}. {bot.label} — ارسال: {bot.sent_count}، خطا: {bot.error_count}")
         return lines
 
+
+def _forward_source_id(msg: dict) -> int | None:
+    """شناسه‌ی پیام در کانال مبدا، از اطلاعات فورواردِ پیامی که به ربات رسیده."""
+    origin = msg.get("forward_origin") or {}
+    for value in (origin.get("message_id"), msg.get("forward_from_message_id")):
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def match_forwarded(expected: list[int], received: list[dict]) -> dict[int, int]:
+    """پیام‌های رسیده به پی‌وی ربات ← پیام‌های مبدا. اول دقیق (با شناسه‌ی پیام
+    مبدا در forward_origin)، بقیه به ترتیب رسیدن (فقط اگر تعدادشان جور باشد)."""
+    wanted = set(expected)
+    mapping: dict[int, int] = {}
+    leftovers: list[int] = []
+    for msg in received:
+        try:
+            bot_mid = int(msg["message_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        src = _forward_source_id(msg)
+        if src is not None and src in wanted and src not in mapping:
+            mapping[src] = bot_mid
+        else:
+            leftovers.append(bot_mid)
+    rest = [m for m in expected if m not in mapping]
+    if rest and len(rest) == len(leftovers):
+        for src, bot_mid in zip(rest, sorted(leftovers)):
+            mapping[src] = bot_mid
+    return mapping
