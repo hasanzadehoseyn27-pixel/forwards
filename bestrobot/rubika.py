@@ -198,7 +198,12 @@ class RubikaAccount:
         try:
             result = await self.client.builder(method, input=data, dict=True)
         except exceptions.TooRequests as exc:
-            log.warning("روبیکا برای %s خطای TOO_REQUESTS داد: %s", method, getattr(exc, "dev_message", "") or exc)
+            detail = str(getattr(exc, "message", "") or exc)
+            if "TOO_REQUEST" not in detail.upper():
+                # rubpy خطاهای دیگر (مثل INVALID_AUTH برای ورودی نامعتبر) را هم با
+                # همین کلاس می‌دهد؛ آن‌ها محدودیت نیستند و نباید ۶۰ ثانیه منتظر بمانیم
+                raise RuntimeError(f"{method}: {detail}") from exc
+            log.warning("روبیکا برای %s محدودیت داد (TOO_REQUESTS).", method)
             raise _flood_error(60) from exc
         return result or {}
 
@@ -364,9 +369,45 @@ class RubikaAccount:
         return out
 
     async def _newer_than(self, guid: str, min_id: int) -> list[RubikaMessage]:
-        """پیام‌های جدیدتر از min_id، از قدیم به جدید (حداکثر ۵۰۰ تا)."""
-        # از بالا (جدیدترین) به پایین ورق می‌زنیم تا به min_id برسیم — مستقل از
-        # این‌که سرور sort=FromMin را چطور تفسیر کند.
+        """پیام‌های جدیدتر از min_id، از قدیم به جدید.
+
+        با getMessagesInterval (پیام‌های اطراف min_id) — یک درخواست برای هر دور، بدون
+        getChannelInfo. اگر سرور این روش را قبول نکرد، به روش قدیمی برمی‌گردیم.
+        """
+        if getattr(self, "_interval_ok", None) is not False:
+            try:
+                return await self._newer_by_interval(guid, int(min_id))
+            except _FloodWait:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if getattr(self, "_interval_ok", None):
+                    raise
+                log.warning("getMessagesInterval کار نکرد (%s)؛ روش قدیمی استفاده می‌شود.", exc)
+                self._interval_ok = False
+        return await self._newer_by_paging(guid, int(min_id))
+
+    async def _newer_by_interval(self, guid: str, min_id: int) -> list[RubikaMessage]:
+        out: dict[int, RubikaMessage] = {}
+        middle = min_id
+        for _ in range(20):
+            res = await self._call(
+                "getMessagesInterval", {"object_guid": guid, "middle_message_id": str(middle)}
+            )
+            batch = res.get("messages")
+            if batch is None:
+                batch = _find(res, ["messages"]) or []
+            msgs = [m for m in (parse_message(b) for b in batch if isinstance(b, dict)) if m]
+            newer = [m for m in msgs if m.id > min_id and m.id not in out]
+            for m in newer:
+                out[m.id] = m
+            self._interval_ok = True
+            if not newer or not res.get("new_has_continue"):
+                break
+            middle = max(m.id for m in newer)
+        return [out[k] for k in sorted(out)]
+
+    async def _newer_by_paging(self, guid: str, min_id: int) -> list[RubikaMessage]:
+        """روش قدیمی: از جدیدترین پیام به عقب ورق می‌زنیم تا به min_id برسیم."""
         out: dict[int, RubikaMessage] = {}
         anchor = await self._top_anchor(guid)
         for _ in range(10):
