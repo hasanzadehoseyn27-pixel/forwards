@@ -334,10 +334,11 @@ class BotPool:
                 except asyncio.TimeoutError:
                     break
 
-            if unsure and not received:
-                raise RelayNothingDelivered(message_ids)
-
             mapping = match_forwarded(expected, received)
+            # جواب خالی و هیچ‌کدام از همین پیام‌ها هم به ربات نرسید (پیامِ دیرکردِ
+            # relay قبلی حساب نمی‌شود) ← قابل فوروارد نیستند
+            if unsure and not mapping:
+                raise RelayNothingDelivered(message_ids)
             if len(mapping) != len(expected):
                 log.warning(
                     "relay به %s: %s پیام فرستاده شد ولی %s تا شناسایی شد؛ بقیه دوباره امتحان می‌شوند.",
