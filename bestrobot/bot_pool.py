@@ -73,6 +73,16 @@ def load_bot_tokens(path: Path) -> list[str]:
     return tokens
 
 
+class RelayNothingDelivered(Exception):
+    """تلگرام هیچ‌کدام از این پیام‌ها را فوروارد نکرد (جواب خالی و هیچ پیامی هم به
+    پی‌وی ربات نرسید) — معمولاً یعنی پیام‌ها در کانال مبدا حذف شده‌اند. تلاش
+    دوباره فقط اکانت را به FloodWait می‌کشاند."""
+
+    def __init__(self, message_ids: list[int]) -> None:
+        super().__init__(f"{len(message_ids)} پیام قابل فوروارد نبود")
+        self.message_ids = list(message_ids)
+
+
 class BotApiError(Exception):
     def __init__(self, code: int, description: str, retry_after: int | None = None) -> None:
         super().__init__(f"{code}: {description}")
@@ -314,7 +324,7 @@ class BotPool:
             expected = message_ids if unsure else delivered
 
             received: list[dict] = []
-            deadline = time.monotonic() + (15 if unsure else 30)
+            deadline = time.monotonic() + (10 if unsure else 30)
             while len(received) < len(expected):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -323,6 +333,9 @@ class BotPool:
                     received.append(await asyncio.wait_for(bot.inbox.get(), timeout=remaining))
                 except asyncio.TimeoutError:
                     break
+
+            if unsure and not received:
+                raise RelayNothingDelivered(message_ids)
 
             mapping = match_forwarded(expected, received)
             if len(mapping) != len(expected):

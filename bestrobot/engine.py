@@ -17,7 +17,7 @@ from telethon.errors import (
 )
 from telethon.tl.types import MessageEntityStrike
 
-from .bot_pool import BotApiError, BotPool, PoolBot
+from .bot_pool import BotApiError, BotPool, PoolBot, RelayNothingDelivered
 from .config import Settings, normalize_peer
 from .db import Database, now_ts
 
@@ -594,10 +594,22 @@ class ForwardEngine:
         if need_relay:
             relay_ids = [int(j["telegram_message_id"]) for j in need_relay]
             mapping: dict[int, int] = {}
+            gone: set[int] = set()
             try:
                 for start in range(0, len(relay_ids), 100):
                     chunk = relay_ids[start : start + 100]
-                    mapping.update(await self.pool.relay(self.client, source_peer, chunk, source_id, bot))
+                    try:
+                        mapping.update(await self.pool.relay(self.client, source_peer, chunk, source_id, bot))
+                    except RelayNothingDelivered as exc:
+                        if len(chunk) > 1:
+                            # شاید فقط یکی‌دوتا خراب باشند: تک‌تک امتحان می‌شوند (یک بار)
+                            for mid in chunk:
+                                try:
+                                    mapping.update(await self.pool.relay(self.client, source_peer, [mid], source_id, bot))
+                                except RelayNothingDelivered:
+                                    gone.add(mid)
+                        else:
+                            gone.update(exc.message_ids)
             except FloodWaitError as exc:
                 wait_seconds = int(getattr(exc, "seconds", 60)) + 5
                 self._group_flood_until[group_id] = now_ts() + wait_seconds
@@ -616,6 +628,14 @@ class ForwardEngine:
                 log.warning("خطای تلگرام هنگام انتقال پیام به %s: %s", bot.label, exc)
             except Exception as exc:  # noqa: BLE001
                 log.exception("خطا هنگام انتقال پیام به %s: %s", bot.label, exc)
+
+            if gone:
+                gone_jobs = [j for j in need_relay if int(j["telegram_message_id"]) in gone]
+                self._fail_permanently(
+                    gone_jobs, f"پیام در مبدا {source_peer} قابل فوروارد نیست (احتمالاً حذف شده) — دیگر تلاش نمی‌شود"
+                )
+                need_relay = [j for j in need_relay if int(j["telegram_message_id"]) not in gone]
+                log.warning("%s پیام از %s قابل فوروارد نبود (احتمالاً حذف شده)؛ کنار گذاشته شد.", len(gone_jobs), source_peer)
 
             unmapped = []
             for job in need_relay:
