@@ -120,6 +120,13 @@ def parse_message(raw: dict) -> RubikaMessage | None:
     )
 
 
+try:
+    from telethon.errors import FloodWaitError as _FloodWait
+except Exception:  # noqa: BLE001
+    class _FloodWait(Exception):  # type: ignore[no-redef]
+        pass
+
+
 def _flood_error(seconds: int = 60):
     from telethon.errors import FloodWaitError
 
@@ -290,7 +297,16 @@ class RubikaAccount:
         return [m for m in msgs if isinstance(m, dict)], res
 
     async def _top_anchor(self, guid: str) -> str:
-        """max_id برای گرفتن جدیدترین پیام‌ها: آخرین پیام چت + ۱ (اگر سرور بدهد)."""
+        """max_id برای گرفتن جدیدترین پیام‌ها.
+
+        اول عدد خیلی بزرگ (_TOP_MESSAGE_ID) امتحان می‌شود که هیچ درخواست اضافه‌ای
+        نمی‌خواهد. قبلاً برای هر کانال در هر دور یک getChannelInfo زده می‌شد و با
+        ده‌ها کانال، روبیکا مدام TOO_REQUESTS می‌داد (و عضویت/کشف کانال‌ها هم
+        پشت همین محدودیت گیر می‌کرد). فقط اگر سرور عدد بزرگ را قبول نکند، به
+        روش قدیمی (آخرین پیام چت + ۱) برمی‌گردیم.
+        """
+        if getattr(self, "_top_ok", None) is not False:
+            return _TOP_MESSAGE_ID
         try:
             info = await self._info(guid)
             last = _find(info, ["last_message_id"])
@@ -300,13 +316,40 @@ class RubikaAccount:
             pass
         return _TOP_MESSAGE_ID
 
+    async def _first_page(self, guid: str, anchor: str, limit: int) -> tuple[list[dict], dict]:
+        """مثل _page با FromMax؛ اگر سرور عدد بزرگ را رد کرد، یک بار با روش قدیمی."""
+        if anchor != _TOP_MESSAGE_ID:
+            return await self._page(guid, "FromMax", anchor, limit)
+        try:
+            result = await self._page(guid, "FromMax", anchor, limit)
+            if result[0] or getattr(self, "_top_ok", None):
+                self._top_ok = True
+                return result
+            # خالی برگشت و هنوز نمی‌دانیم سرور عدد بزرگ را درست می‌فهمد یا نه:
+            # یک بار با آخرین پیام چت مقایسه می‌کنیم
+            self._top_ok = False
+            fallback = await self._page(guid, "FromMax", await self._top_anchor(guid), limit)
+            if fallback[0]:
+                log.warning("روبیکا با max_id بزرگ پیامی نداد؛ روش آخرین پیام چت استفاده می‌شود.")
+                return fallback
+            self._top_ok = None  # کانال واقعاً خالی بود؛ دفعه‌ی بعد دوباره عدد بزرگ
+            return result
+        except _FloodWait:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if getattr(self, "_top_ok", None):
+                raise
+            log.warning("روبیکا max_id بزرگ را قبول نکرد (%s)؛ روش آخرین پیام چت استفاده می‌شود.", exc)
+            self._top_ok = False
+            return await self._page(guid, "FromMax", await self._top_anchor(guid), limit)
+
     async def _latest_desc(self, guid: str, limit: int) -> list[RubikaMessage]:
         """جدیدترین پیام‌ها، از جدید به قدیم."""
         out: list[RubikaMessage] = []
         anchor = await self._top_anchor(guid)
         seen: set[int] = set()
         for _ in range(20):
-            batch, _res = await self._page(guid, "FromMax", anchor, min(50, max(2, limit - len(out) + 1)))
+            batch, _res = await self._first_page(guid, anchor, min(50, max(2, limit - len(out) + 1)))
             msgs = [m for m in (parse_message(b) for b in batch) if m and m.id not in seen]
             if not msgs:
                 break
@@ -327,7 +370,7 @@ class RubikaAccount:
         out: dict[int, RubikaMessage] = {}
         anchor = await self._top_anchor(guid)
         for _ in range(10):
-            batch, _res = await self._page(guid, "FromMax", anchor, 50)
+            batch, _res = await self._first_page(guid, anchor, 50)
             msgs = [m for m in (parse_message(b) for b in batch) if m]
             if not msgs:
                 break
