@@ -44,6 +44,11 @@ class ForwardEngine:
         self.send_semaphore = asyncio.Semaphore(settings.max_parallel_sends)
         self.tasks: list[asyncio.Task[None]] = []
         self._group_flood_until: dict[int, int] = {}
+        # (bot_index, source_id, پیام مبدا) → آخرین زمانی که همین نسخه‌ی پی‌وی ربات
+        # در یک مقصد با موفقیت فرستاده شد. اگر همان نسخه در مقصد دیگری «پیدا نشد»
+        # بگیرد، ایراد از آن مقصد است (مثلاً نوع پیام در آن گروه بسته است)، نه از
+        # پی‌وی ربات؛ پس نسخه پاک نمی‌شود و اکانت بی‌جهت دوباره منتقل نمی‌کند.
+        self._relay_ok: dict[tuple[int, int, int], int] = {}
 
     async def start(self) -> None:
         recovered = self.db.recover_running_jobs()
@@ -682,6 +687,11 @@ class ForwardEngine:
             return
         try:
             await self.pool.forward_from_bot(bot, chat_id, [bot_mid for _, bot_mid in items])
+            stamp = now_ts()
+            if len(self._relay_ok) > 50000:
+                self._relay_ok = {k: v for k, v in self._relay_ok.items() if stamp - v < 3600}
+            for job in jobs:
+                self._relay_ok[(bot.index, source_id, int(job["telegram_message_id"]))] = stamp
             for job in jobs:
                 self.db.finish_job(int(job["id"]), ok=True, max_attempts=self.settings.max_job_attempts)
             log.info("ارسال موفق با %s: گروه %s، %s پیام، مقصد %s", bot.label, group_id, len(jobs), dest_peer)
@@ -708,6 +718,24 @@ class ForwardEngine:
                     f"گروه {dest_peer} این نوع پیام را اجازه نمی‌دهد ({exc.description}) — در تنظیمات گروه دسترسی را باز کن",
                 )
                 log.warning("%s: گروه %s این پیام را قبول نمی‌کند (%s)؛ دیگر تلاش نمی‌شود.", bot.label, dest_peer, exc.description)
+            elif exc.is_message_gone and any(
+                now_ts() - self._relay_ok.get((bot.index, source_id, int(job["telegram_message_id"])), 0) < 1800
+                for job, _ in items
+            ):
+                # همین نسخه‌ها همین تازگی در مقصدهای دیگر رفته‌اند ← مشکل از این مقصد است
+                if len(items) == 1:
+                    self._fail_permanently(
+                        jobs,
+                        f"گروه {dest_peer} این پیام را از ربات قبول نمی‌کند ({exc.description}) — "
+                        "احتمالاً این نوع پیام (عکس/ویدیو/لینک) در تنظیمات گروه بسته است",
+                    )
+                    log.warning("%s: گروه %s این پیام را قبول نمی‌کند (%s)؛ کنار گذاشته شد.", bot.label, dest_peer, exc.description)
+                else:
+                    # دسته نصف می‌شود تا فقط پیامِ مشکل‌دار کنار برود و بقیه بروند
+                    log.warning("%s: گروه %s بخشی از دسته را قبول نکرد؛ دسته کوچک‌تر ارسال می‌شود.", bot.label, dest_peer)
+                    mid = len(items) // 2
+                    await self._send_with_bot(bot, items[:mid], chat_id, source_id, dest_peer, group_id)
+                    await self._send_with_bot(bot, items[mid:], chat_id, source_id, dest_peer, group_id)
             elif exc.is_message_gone:
                 for job, _ in items:
                     self.db.delete_relay(source_id, int(job["telegram_message_id"]), bot.index)
