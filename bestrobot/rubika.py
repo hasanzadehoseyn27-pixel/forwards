@@ -127,6 +127,9 @@ except Exception:  # noqa: BLE001
         pass
 
 
+_FLOOD_STEPS = (60, 180, 300, 600, 900)
+
+
 def _flood_error(seconds: int = 60):
     from telethon.errors import FloodWaitError
 
@@ -163,6 +166,10 @@ class RubikaAccount:
         self.guid: str = ""
         self._peer_cache: dict[str, str] = {}
         self._title_cache: dict[str, str] = {}
+        # محدودیت پشت‌سرهم روی یک متد ← صبر طولانی‌تر (۱، ۳، ۵، ۱۰، ۱۵ دقیقه).
+        # قبلاً هر ۶۵ ثانیه دوباره امتحان می‌شد و روبیکا محدودیت را تمدید می‌کرد.
+        self._flood_streak: dict[str, int] = {}
+        self._cooldown: dict[str, float] = {}
 
     # ------------------------------------------------------------ lifecycle
 
@@ -195,6 +202,9 @@ class RubikaAccount:
     async def _call(self, method: str, data: dict) -> dict:
         from rubpy import exceptions
 
+        left = self._cooldown.get(method, 0.0) - time.monotonic()
+        if left > 0:
+            raise _flood_error(int(left) + 1)
         try:
             result = await self.client.builder(method, input=data, dict=True)
         except exceptions.TooRequests as exc:
@@ -203,8 +213,13 @@ class RubikaAccount:
                 # rubpy خطاهای دیگر (مثل INVALID_AUTH برای ورودی نامعتبر) را هم با
                 # همین کلاس می‌دهد؛ آن‌ها محدودیت نیستند و نباید ۶۰ ثانیه منتظر بمانیم
                 raise RuntimeError(f"{method}: {detail}") from exc
-            log.warning("روبیکا برای %s محدودیت داد (TOO_REQUESTS).", method)
-            raise _flood_error(60) from exc
+            streak = self._flood_streak.get(method, 0) + 1
+            self._flood_streak[method] = streak
+            wait = _FLOOD_STEPS[min(streak, len(_FLOOD_STEPS)) - 1]
+            self._cooldown[method] = time.monotonic() + wait
+            log.warning("روبیکا برای %s محدودیت داد (TOO_REQUESTS)؛ بار %s پشت‌سرهم ← %s ثانیه صبر.", method, streak, wait)
+            raise _flood_error(wait) from exc
+        self._flood_streak.pop(method, None)
         return result or {}
 
     async def get_me(self):
