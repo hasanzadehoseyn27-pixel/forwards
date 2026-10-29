@@ -311,18 +311,6 @@ class ForwardEngine:
         group_id = int(first["group_id"])
         job_ids = [int(j["id"]) for j in jobs]
 
-        blocked_until = self._group_flood_until.get(group_id)
-        if blocked_until and now_ts() < blocked_until:
-            for jid in job_ids:
-                self.db.finish_job(
-                    jid,
-                    ok=False,
-                    error="گروه هنوز در محدودیت FloodWait قبلی است؛ ارسال عقب افتاد",
-                    run_after=blocked_until,
-                    max_attempts=999999,
-                )
-            return
-
         group = self.db.get_group(group_id)
         if not group or not group["enabled"]:
             for jid in job_ids:
@@ -344,6 +332,20 @@ class ForwardEngine:
 
         if self.pool is not None and self._dest_uses_pool(destination):
             await self.send_batch_via_bots(jobs, group_id, source, destination)
+            return
+
+        blocked_until = self._group_flood_until.get(group_id)
+        # با استخر ربات‌ها، FloodWait اکانت فقط انتقال پیام‌های تازه را عقب می‌اندازد
+        # (send_batch_via_bots)؛ پیام‌هایی که در پی‌وی ربات‌ها هست همچنان می‌روند
+        if blocked_until and now_ts() < blocked_until:
+            for jid in job_ids:
+                self.db.finish_job(
+                    jid,
+                    ok=False,
+                    error="گروه هنوز در محدودیت FloodWait قبلی است؛ ارسال عقب افتاد",
+                    run_after=blocked_until,
+                    max_attempts=999999,
+                )
             return
 
         message_ids = [int(j["telegram_message_id"]) for j in jobs]
@@ -568,49 +570,58 @@ class ForwardEngine:
             for bot_index, bot_mid in rows:
                 held.setdefault(bot_index, {})[mid] = bot_mid
 
-        # «ربات خانگی» هر کانال ثابت است (بر اساس شماره‌ی کانال)، تا پیام‌های یک کانال
-        # همیشه در پی‌وی همان ربات جمع شوند و نوبت‌های بعدی بدون انتقال دوباره ارسال شوند.
+        # «ربات خانگی» هر کانال ثابت است (بر اساس شماره‌ی کانال)، تا پیام‌های تازه‌ی یک
+        # کانال همیشه در پی‌وی همان ربات جمع شوند.
         home = usable[source_id % len(usable)]
         free = [b for b in usable if self.pool.flood_remaining(b, chat_id) <= 0]
         if not free:
             wait = min(self.pool.flood_remaining(b, chat_id) for b in usable)
             self._defer(jobs, int(wait) + 1, f"همه‌ی ربات‌های مقصد {dest_peer} در محدودیت ارسال‌اند؛ کمی بعد")
             return
-        home_wait = self.pool.flood_remaining(home, chat_id)
-        # رباتی که «همه‌ی» پیام‌های این دسته را از قبل در پی‌وی دارد، بدون انتقال
-        # دوباره با اکانت می‌فرستد. اگر چنین رباتی هست ولی الان در محدودیت ارسال
-        # است، صبر می‌کنیم تا آزاد شود — قبلاً به ربات دیگری می‌رفت و اکانت همه‌ی
-        # پیام‌ها را دوباره منتقل می‌کرد؛ با ارسال تکراری هر چند دقیقه، اکانت هر
-        # ساعت ~۴۰ دقیقه FloodWait می‌گرفت و کل ارسال‌ها می‌خوابید.
-        holding = [b for b in usable if all(mid in held.get(b.index, {}) for mid in message_ids)]
-        free_holding = [b for b in holding if b in free]
-        if holding and not free_holding:
-            wait = min(self.pool.flood_remaining(b, chat_id) for b in holding)
-            self._defer(jobs, int(wait) + 1, "ربات‌هایی که این پیام‌ها را دارند در محدودیت ارسال‌اند؛ بعد همان‌ها می‌فرستند")
-            return
-        if free_holding:
-            bot = home if home in free_holding else max(free_holding, key=lambda b: -b.index)
-        elif home in free:
-            bot = home
-        elif home_wait <= 120 or (held.get(home.index) and home_wait <= 900):
-            # (اگر ربات خانگی بخشی از پیام‌ها را دارد، تا ۱۵ دقیقه هم صبر می‌کنیم)
-            # محدودیت کوتاه است؛ صبر می‌کنیم تا همان ربات خانگی بفرستد (بی‌جهت به ربات دیگر منتقل نمی‌کنیم)
-            self._defer(jobs, int(home_wait) + 1, f"{home.label} چند ثانیه در محدودیت ارسال است؛ بعد همان می‌فرستد")
-            return
-        else:
-            bot = max(free, key=lambda b: (len(held.get(b.index, {})), -b.index))
+        free_idx = {b.index for b in free}
 
-        mine = held.get(bot.index, {})
-        items: list[tuple[object, int]] = []
+        # هر پیامی که در پی‌وی یک ربات آزاد هست، با همان ربات و «بدون» اکانت می‌رود
+        # (ربات خانگی اولویت دارد، بعد رباتی که بیشترِ پیام‌های این دسته را دارد).
+        # فقط پیامی که در پی‌وی هیچ رباتی نیست با اکانت منتقل می‌شود. قبلاً اگر
+        # پیام‌های یک کانال بین چند ربات پخش شده بودند، در هر دور تکرار دوباره
+        # منتقل می‌شدند ← اکانت مدام FloodWait می‌گرفت و کل گروه می‌خوابید.
+        by_bot: dict[int, list] = {}
+        waiting: list = []
         need_relay: list = []
+        waiting_holders: set[int] = set()
         for job in jobs:
             mid = int(job["telegram_message_id"])
-            if mid in mine:
-                items.append((job, mine[mid]))
+            owners = {bi: bm for bi, bm in holders.get(mid, [])}
+            free_owners = [bi for bi in owners if bi in free_idx]
+            if free_owners:
+                pick = home.index if home.index in free_owners else max(
+                    free_owners, key=lambda bi: (len(held.get(bi, {})), -bi)
+                )
+                by_bot.setdefault(pick, []).append((job, owners[pick]))
+            elif owners:
+                waiting.append(job)
+                waiting_holders.update(owners)
             else:
                 need_relay.append(job)
 
+        if waiting:
+            wait = min(
+                self.pool.flood_remaining(self.pool.bot_by_index(bi), chat_id)
+                for bi in waiting_holders
+                if self.pool.bot_by_index(bi) is not None
+            ) if any(self.pool.bot_by_index(bi) is not None for bi in waiting_holders) else 60
+            self._defer(waiting, int(wait) + 1, "ربات‌هایی که این پیام‌ها را دارند در محدودیت ارسال‌اند؛ بعد همان‌ها می‌فرستند")
+
         if need_relay:
+            # FloodWait مال خودِ اکانت است، نه یک گروه: اگر هر گروهی آن را گرفته، صبر می‌کنیم
+            blocked_until = max(self._group_flood_until.values(), default=0)
+            if blocked_until > now_ts():
+                # اکانت در FloodWait است: فقط پیام‌های تازه صبر می‌کنند؛ بقیه همین الان با ربات‌ها می‌روند
+                self._defer(need_relay, blocked_until - now_ts(), "اکانت در محدودیت FloodWait است؛ پیام تازه کمی بعد منتقل می‌شود")
+                need_relay = []
+
+        if need_relay:
+            bot = home if home in free else max(free, key=lambda b: (len(held.get(b.index, {})), -b.index))
             relay_ids = [int(j["telegram_message_id"]) for j in need_relay]
             mapping: dict[int, int] = {}
             gone: set[int] = set()
@@ -660,15 +671,11 @@ class ForwardEngine:
             for job in need_relay:
                 mid = int(job["telegram_message_id"])
                 if mid in mapping:
-                    items.append((job, mapping[mid]))
+                    by_bot.setdefault(bot.index, []).append((job, mapping[mid]))
                 else:
                     unmapped.append(job)
             if unmapped:
-                if items:
-                    # بخشی از دسته منتقل نشد؛ برای اینکه همه با هم بروند، کل دسته
-                    # کمی عقب می‌افتد (پیام‌های منتقل‌شده در پی‌وی ربات می‌مانند).
-                    unmapped = unmapped + [job for job, _ in items]
-                    items = []
+                # فقط همین پیام‌ها عقب می‌افتند؛ بقیه‌ی دسته معطل آن‌ها نمی‌ماند
                 blocked_until = self._group_flood_until.get(group_id, 0)
                 delay = max(60, blocked_until - now_ts())
                 for job in unmapped:
@@ -680,17 +687,20 @@ class ForwardEngine:
                         max_attempts=self.settings.max_job_attempts * 3,
                     )
 
-        # به ترتیب پیام‌های مبدا، همه با همان یک ربات
-        items.sort(key=lambda it: int(it[0]["telegram_message_id"]))
-        plan = {bot.index: items} if items else {}
-
-        if plan:
-            await asyncio.gather(
-                *(
-                    self._send_with_bot(self.pool.bot_by_index(bot_index), items, chat_id, source_id, dest_peer, group_id)
-                    for bot_index, items in plan.items()
-                )
-            )
+        # ترتیب دقیق پیام‌های مبدا حفظ می‌شود: پیام‌ها به ترتیب، و هر تکه‌ی پشت‌سرهمی که
+        # در پی‌وی یک ربات است با همان ربات یک‌جا فرستاده می‌شود
+        ordered = sorted(
+            ((int(job["telegram_message_id"]), bi, job, bm) for bi, items in by_bot.items() for job, bm in items),
+            key=lambda x: x[0],
+        )
+        runs: list[tuple[int, list]] = []
+        for _, bi, job, bm in ordered:
+            if runs and runs[-1][0] == bi:
+                runs[-1][1].append((job, bm))
+            else:
+                runs.append((bi, [(job, bm)]))
+        for bot_index, items in runs:
+            await self._send_with_bot(self.pool.bot_by_index(bot_index), items, chat_id, source_id, dest_peer, group_id)
 
     async def _send_with_bot(self, bot: PoolBot, items: list, chat_id: int, source_id: int, dest_peer: str, group_id: int) -> None:
         assert self.pool is not None
