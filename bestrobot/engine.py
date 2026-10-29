@@ -577,9 +577,23 @@ class ForwardEngine:
             self._defer(jobs, int(wait) + 1, f"همه‌ی ربات‌های مقصد {dest_peer} در محدودیت ارسال‌اند؛ کمی بعد")
             return
         home_wait = self.pool.flood_remaining(home, chat_id)
-        if home in free:
+        # رباتی که «همه‌ی» پیام‌های این دسته را از قبل در پی‌وی دارد، بدون انتقال
+        # دوباره با اکانت می‌فرستد. اگر چنین رباتی هست ولی الان در محدودیت ارسال
+        # است، صبر می‌کنیم تا آزاد شود — قبلاً به ربات دیگری می‌رفت و اکانت همه‌ی
+        # پیام‌ها را دوباره منتقل می‌کرد؛ با ارسال تکراری هر چند دقیقه، اکانت هر
+        # ساعت ~۴۰ دقیقه FloodWait می‌گرفت و کل ارسال‌ها می‌خوابید.
+        holding = [b for b in usable if all(mid in held.get(b.index, {}) for mid in message_ids)]
+        free_holding = [b for b in holding if b in free]
+        if holding and not free_holding:
+            wait = min(self.pool.flood_remaining(b, chat_id) for b in holding)
+            self._defer(jobs, int(wait) + 1, "ربات‌هایی که این پیام‌ها را دارند در محدودیت ارسال‌اند؛ بعد همان‌ها می‌فرستند")
+            return
+        if free_holding:
+            bot = home if home in free_holding else max(free_holding, key=lambda b: -b.index)
+        elif home in free:
             bot = home
-        elif home_wait <= 120:
+        elif home_wait <= 120 or (held.get(home.index) and home_wait <= 900):
+            # (اگر ربات خانگی بخشی از پیام‌ها را دارد، تا ۱۵ دقیقه هم صبر می‌کنیم)
             # محدودیت کوتاه است؛ صبر می‌کنیم تا همان ربات خانگی بفرستد (بی‌جهت به ربات دیگر منتقل نمی‌کنیم)
             self._defer(jobs, int(home_wait) + 1, f"{home.label} چند ثانیه در محدودیت ارسال است؛ بعد همان می‌فرستد")
             return
