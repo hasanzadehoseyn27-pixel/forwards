@@ -25,6 +25,8 @@ from .db import Database, now_ts
 log = logging.getLogger(__name__)
 
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+# این تعداد محدودیت ارسال پشت‌سرهم در یک مقصد ← ربات «گیرکرده» حساب می‌شود
+STUCK_STREAK = 4
 
 
 class ForwardEngine:
@@ -49,6 +51,11 @@ class ForwardEngine:
         # بگیرد، ایراد از آن مقصد است (مثلاً نوع پیام در آن گروه بسته است)، نه از
         # پی‌وی ربات؛ پس نسخه پاک نمی‌شود و اکانت بی‌جهت دوباره منتقل نمی‌کند.
         self._relay_ok: dict[tuple[int, int, int], int] = {}
+        # (bot_index, chat_id) → چند بار پشت‌سرهم در این مقصد محدودیت ارسال (429) گرفته.
+        # رباتی که مدام محدود است «گیرکرده» حساب می‌شود و پیام‌هایش به ربات دیگری
+        # سپرده می‌شود؛ وگرنه کل صف پشت همان یک ربات می‌ماند (مثل ربات ۲ روبیکا).
+        self._flood_streak: dict[tuple[int, int], int] = {}
+        self._flood_last: dict[tuple[int, int], int] = {}
 
     async def start(self) -> None:
         recovered = self.db.recover_running_jobs()
@@ -578,6 +585,18 @@ class ForwardEngine:
             wait = min(self.pool.flood_remaining(b, chat_id) for b in usable)
             self._defer(jobs, int(wait) + 1, f"همه‌ی ربات‌های مقصد {dest_peer} در محدودیت ارسال‌اند؛ کمی بعد")
             return
+        for b in usable:
+            # بعد از یک ساعت دوباره به ربات گیرکرده فرصت داده می‌شود
+            if now_ts() - self._flood_last.get((b.index, chat_id), 0) > 3600:
+                self._flood_streak.pop((b.index, chat_id), None)
+        stuck = {b.index for b in usable if self._flood_streak.get((b.index, chat_id), 0) >= STUCK_STREAK}
+        if stuck and len(stuck) < len(usable):
+            # ربات‌های گیرکرده نه نگهدارنده حساب می‌شوند نه مقصد انتقال (تا وقتی یک بار موفق بفرستند)
+            holders = {mid: [(bi, bm) for bi, bm in rows if bi not in stuck] for mid, rows in holders.items()}
+            held = {bi: m for bi, m in held.items() if bi not in stuck}
+            free = [b for b in free if b.index not in stuck] or free
+            if home.index in stuck:
+                home = min(free, key=lambda b: b.index)
         free_idx = {b.index for b in free}
 
         # هر پیامی که در پی‌وی یک ربات آزاد هست، با همان ربات و «بدون» اکانت می‌رود
@@ -711,6 +730,7 @@ class ForwardEngine:
             return
         try:
             await self.pool.forward_from_bot(bot, chat_id, [bot_mid for _, bot_mid in items])
+            self._flood_streak.pop((bot.index, chat_id), None)
             stamp = now_ts()
             if len(self._relay_ok) > 50000:
                 self._relay_ok = {k: v for k, v in self._relay_ok.items() if stamp - v < 3600}
@@ -722,7 +742,11 @@ class ForwardEngine:
         except BotApiError as exc:
             bot.error_count += 1
             if exc.is_flood:
-                wait_seconds = int(exc.retry_after or 30) + 1
+                streak = self._flood_streak.get((bot.index, chat_id), 0) + 1
+                self._flood_streak[(bot.index, chat_id)] = streak
+                self._flood_last[(bot.index, chat_id)] = now_ts()
+                # محدودیت پشت‌سرهم ← صبر بیشتر (۱، ۲، ۴، ... برابر؛ حداکثر ۳۰ دقیقه)
+                wait_seconds = min(1800, (int(exc.retry_after or 30) + 1) * (2 ** min(streak - 1, 6)))
                 self.pool.set_flood(bot, chat_id, wait_seconds)
                 self._defer(jobs, wait_seconds, f"{bot.label} محدودیت {wait_seconds} ثانیه گرفت؛ بعد از آن ادامه می‌دهد")
                 log.warning("429 برای %s در مقصد %s: %s ثانیه", bot.label, dest_peer, wait_seconds)
