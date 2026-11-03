@@ -335,6 +335,17 @@ class BotPool:
                     break
 
             mapping = match_forwarded(expected, received)
+            if unsure:
+                # برای عیب‌یابی «missing message mappings»: چه چیزی واقعاً به ربات رسید
+                log.warning(
+                    "relay-check %s از %s: %s پیام فرستاده شد، %s پیام به ربات رسید، %s تطبیق خورد (منبع‌های رسیده: %s)",
+                    bot.label,
+                    source_peer,
+                    len(expected),
+                    len(received),
+                    len(mapping),
+                    [_forward_source_id(m) for m in received][:10],
+                )
             # جواب خالی و هیچ‌کدام از همین پیام‌ها هم به ربات نرسید (پیامِ دیرکردِ
             # relay قبلی حساب نمی‌شود) ← قابل فوروارد نیستند
             if unsure and not mapping:
