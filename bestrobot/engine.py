@@ -261,12 +261,14 @@ class ForwardEngine:
                 log.info("برای گروه %s تعداد %s ارسال تکراری وارد صف شد.", group_id, total)
 
     async def drop_deleted_messages(self, group_id: int, today: str) -> None:
-        """آگهی‌هایی که صاحب کانال پاک کرده دیگر در دورهای تکرار فرستاده نشوند.
+        """دور تکرار باید همان چیزی را بفرستد که الان در کانال است.
 
-        ربات‌ها از نسخه‌ی پی‌وی خودشان می‌فرستند، پس پاک شدن پیام در کانال مبدا
-        خودبه‌خود دیده نمی‌شود. قبل از هر دور تکرار، پیام‌های امروزِ هر مبدا با
-        اکانت دوباره خوانده می‌شوند (حداکثر هر EXISTS_CHECK_SECONDS یک بار برای هر مبدا)
-        و پیام‌هایی که دیگر وجود ندارند از حافظه، صف و نسخه‌های پی‌وی ربات‌ها پاک می‌شوند.
+        ربات‌ها از نسخه‌ی پی‌وی خودشان می‌فرستند، پس پاک شدن یا ویرایش پیام در کانال
+        مبدا خودبه‌خود دیده نمی‌شود. قبل از هر دور تکرار، پیام‌های امروزِ هر مبدا با
+        اکانت دوباره خوانده می‌شوند (حداکثر هر EXISTS_CHECK_SECONDS یک بار برای هر مبدا):
+        - پیام پاک‌شده از حافظه، صف و نسخه‌های پی‌وی ربات‌ها پاک می‌شود (دیگر نمی‌رود)؛
+        - پیام ویرایش‌شده: متن تازه ثبت و نسخه‌ی قدیمی پی‌وی ربات‌ها دور ریخته می‌شود،
+          پس دور بعد نسخه‌ی ویرایش‌شده منتقل و فرستاده می‌شود.
         """
         if now_ts() < max(self._group_flood_until.values(), default=0):
             return  # اکانت در FloodWait است؛ این دور بررسی نمی‌شود
@@ -274,11 +276,13 @@ class ForwardEngine:
             source_id = int(source["id"])
             if now_ts() - self._exists_checked.get(source_id, 0) < EXISTS_CHECK_SECONDS:
                 continue
-            ids = self.db.cached_message_ids(source_id, today)
-            if not ids:
+            cached = self.db.cached_messages(source_id, today)
+            if not cached:
                 continue
+            ids = sorted(cached)
             peer = str(source["peer"])
             gone: list[int] = []
+            edited: list = []
             try:
                 for start in range(0, len(ids), 100):
                     chunk = ids[start : start + 100]
@@ -286,6 +290,8 @@ class ForwardEngine:
                     for mid, msg in zip(chunk, found):
                         if msg is None or getattr(msg, "action", None) is not None:
                             gone.append(mid)
+                        elif (msg.text or "") != (cached.get(mid) or ""):
+                            edited.append((mid, msg))
             except FloodWaitError as exc:
                 wait_seconds = int(getattr(exc, "seconds", 60)) + 5
                 self._group_flood_until[group_id] = now_ts() + wait_seconds
@@ -295,6 +301,10 @@ class ForwardEngine:
                 log.warning("بررسی پیام‌های پاک‌شده‌ی %s نشد: %s", peer, exc)
                 continue
             self._exists_checked[source_id] = now_ts()
+            for mid, msg in edited:
+                self.db.update_edited_message(source_id, mid, msg.text, self._has_strike(msg))
+            if edited:
+                log.info("%s پیام امروزِ %s در کانال ویرایش شده بود؛ از دور بعد نسخه‌ی ویرایش‌شده می‌رود.", len(edited), peer)
             if gone:
                 removed = self.db.forget_deleted_messages(source_id, gone)
                 log.info(

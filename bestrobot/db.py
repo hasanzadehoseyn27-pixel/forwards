@@ -485,16 +485,25 @@ class Database:
         self.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
         return total
 
-    def cached_message_ids(self, source_id: int, today_prefix: str) -> list[int]:
-        """پیام‌های امروزِ یک مبدا (در همه‌ی گروه‌ها)، بدون تکرار."""
-        return [
-            int(r["telegram_message_id"])
-            for r in self.fetchall(
-                "SELECT DISTINCT telegram_message_id FROM message_cache WHERE source_id=? AND message_date LIKE ? "
-                "ORDER BY telegram_message_id",
-                (source_id, f"{today_prefix}%"),
-            )
-        ]
+    def cached_messages(self, source_id: int, today_prefix: str) -> dict[int, str]:
+        """پیام‌های امروزِ یک مبدا (در همه‌ی گروه‌ها) ← متن ذخیره‌شده."""
+        out: dict[int, str] = {}
+        for r in self.fetchall(
+            "SELECT telegram_message_id, text FROM message_cache WHERE source_id=? AND message_date LIKE ? "
+            "ORDER BY telegram_message_id",
+            (source_id, f"{today_prefix}%"),
+        ):
+            out.setdefault(int(r["telegram_message_id"]), r["text"] or "")
+        return out
+
+    def update_edited_message(self, source_id: int, message_id: int, text: str | None, has_strike: bool) -> None:
+        """پیام در کانال ویرایش شد: متن تازه ثبت می‌شود و نسخه‌های قدیمیِ پی‌وی ربات‌ها پاک
+        می‌شوند تا دور بعد، نسخه‌ی ویرایش‌شده دوباره منتقل و فرستاده شود."""
+        self.execute(
+            "UPDATE message_cache SET text=?, has_strike=? WHERE source_id=? AND telegram_message_id=?",
+            (text, int(has_strike), source_id, message_id),
+        )
+        self.execute("DELETE FROM relay_cache WHERE source_id=? AND telegram_message_id=?", (source_id, message_id))
 
     def forget_deleted_messages(self, source_id: int, message_ids: list[int]) -> int:
         """پیام‌هایی که در کانال پاک شده‌اند: از حافظه‌ی تکرار، صف و نسخه‌های پی‌وی ربات‌ها حذف می‌شوند."""
