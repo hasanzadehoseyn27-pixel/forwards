@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -10,6 +11,20 @@ from typing import Any
 
 def now_ts() -> int:
     return int(time.time())
+
+
+_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def duplicate_key(text: str | None) -> str | None:
+    """کلید «همان آگهی»: متن بدون فاصله/علامت/لینک، ارقام یکسان‌شده. متن خیلی کوتاه کلید ندارد
+    (تا دو پیام کوتاه متفاوت، مثلاً دو عکس بی‌متن، یکی حساب نشوند)."""
+    if not text:
+        return None
+    t = text.translate(_DIGITS).replace("ي", "ی").replace("ك", "ک")
+    t = re.sub(r"https?://\S+|t\.me/\S+|@\w+", " ", t)
+    t = re.sub(r"[\W_]+", "", t).lower()
+    return t if len(t) >= 20 else None
 
 
 DEFAULT_BANNED_WORDS = ["تمام", "برکت", "مصیبت", "تسلیت"]
@@ -452,13 +467,52 @@ class Database:
             """,
             (group_id, f"{today_prefix}%"),
         )
+        # اگر یک کانال همان آگهی را امروز چند بار پست کرده، فقط آخرین نسخه‌اش تکرار می‌شود
+        # (وگرنه در هر دور همان آگهی دو-سه بار پشت‌سرهم فرستاده می‌شد)
+        latest: dict[tuple[int, str], int] = {}
+        for row in rows:
+            key = duplicate_key(row["text"])
+            if key:
+                latest[(int(row["source_id"]), key)] = int(row["telegram_message_id"])
         total = 0
         for row in rows:
+            key = duplicate_key(row["text"])
+            if key and latest.get((int(row["source_id"]), key)) != int(row["telegram_message_id"]):
+                continue
             if not self.should_forward(group_id, row["text"], bool(row["has_strike"])):
                 continue
             total += self.enqueue_message(group_id, int(row["source_id"]), int(row["telegram_message_id"]), cycle_key)
         self.execute("UPDATE group_health SET last_repeat_at=? WHERE group_id=?", (now_ts(), group_id))
         return total
+
+    def cached_message_ids(self, source_id: int, today_prefix: str) -> list[int]:
+        """پیام‌های امروزِ یک مبدا (در همه‌ی گروه‌ها)، بدون تکرار."""
+        return [
+            int(r["telegram_message_id"])
+            for r in self.fetchall(
+                "SELECT DISTINCT telegram_message_id FROM message_cache WHERE source_id=? AND message_date LIKE ? "
+                "ORDER BY telegram_message_id",
+                (source_id, f"{today_prefix}%"),
+            )
+        ]
+
+    def forget_deleted_messages(self, source_id: int, message_ids: list[int]) -> int:
+        """پیام‌هایی که در کانال پاک شده‌اند: از حافظه‌ی تکرار، صف و نسخه‌های پی‌وی ربات‌ها حذف می‌شوند."""
+        removed = 0
+        for start in range(0, len(message_ids), 500):
+            chunk = message_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            removed += self.execute(
+                f"DELETE FROM message_cache WHERE source_id=? AND telegram_message_id IN ({marks})", (source_id, *chunk)
+            ).rowcount
+            removed += self.execute(
+                f"DELETE FROM send_jobs WHERE source_id=? AND status='pending' AND telegram_message_id IN ({marks})",
+                (source_id, *chunk),
+            ).rowcount
+            self.execute(
+                f"DELETE FROM relay_cache WHERE source_id=? AND telegram_message_id IN ({marks})", (source_id, *chunk)
+            )
+        return removed
 
     def count_pending_jobs(self, group_id: int) -> int:
         row = self.fetchone("SELECT COUNT(*) as cnt FROM send_jobs WHERE group_id=? AND status='pending'", (group_id,))

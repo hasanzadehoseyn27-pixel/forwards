@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 # این تعداد محدودیت ارسال پشت‌سرهم در یک مقصد ← ربات «گیرکرده» حساب می‌شود
 STUCK_STREAK = 4
+# هر مبدا حداکثر هر چند ثانیه یک بار برای «پیام پاک‌شده» بررسی شود
+EXISTS_CHECK_SECONDS = 240
 
 
 class ForwardEngine:
@@ -56,6 +58,8 @@ class ForwardEngine:
         # سپرده می‌شود؛ وگرنه کل صف پشت همان یک ربات می‌ماند (مثل ربات ۲ روبیکا).
         self._flood_streak: dict[tuple[int, int], int] = {}
         self._flood_last: dict[tuple[int, int], int] = {}
+        # source_id → آخرین زمانی که بررسی شد آگهی‌های امروزِ این مبدا هنوز در کانال هستند
+        self._exists_checked: dict[int, int] = {}
 
     async def start(self) -> None:
         recovered = self.db.recover_running_jobs()
@@ -250,10 +254,55 @@ class ForwardEngine:
                     pending,
                 )
                 continue
+            await self.drop_deleted_messages(group_id, today)
             cycle_key = f"repeat:{today}:{now_ts() // max(1, interval)}"
             total = self.db.enqueue_repeat_due_messages(group_id, cycle_key, today)
             if total:
                 log.info("برای گروه %s تعداد %s ارسال تکراری وارد صف شد.", group_id, total)
+
+    async def drop_deleted_messages(self, group_id: int, today: str) -> None:
+        """آگهی‌هایی که صاحب کانال پاک کرده دیگر در دورهای تکرار فرستاده نشوند.
+
+        ربات‌ها از نسخه‌ی پی‌وی خودشان می‌فرستند، پس پاک شدن پیام در کانال مبدا
+        خودبه‌خود دیده نمی‌شود. قبل از هر دور تکرار، پیام‌های امروزِ هر مبدا با
+        اکانت دوباره خوانده می‌شوند (حداکثر هر EXISTS_CHECK_SECONDS یک بار برای هر مبدا)
+        و پیام‌هایی که دیگر وجود ندارند از حافظه، صف و نسخه‌های پی‌وی ربات‌ها پاک می‌شوند.
+        """
+        if now_ts() < max(self._group_flood_until.values(), default=0):
+            return  # اکانت در FloodWait است؛ این دور بررسی نمی‌شود
+        for source in self.db.group_sources(group_id):
+            source_id = int(source["id"])
+            if now_ts() - self._exists_checked.get(source_id, 0) < EXISTS_CHECK_SECONDS:
+                continue
+            ids = self.db.cached_message_ids(source_id, today)
+            if not ids:
+                continue
+            peer = str(source["peer"])
+            gone: list[int] = []
+            try:
+                for start in range(0, len(ids), 100):
+                    chunk = ids[start : start + 100]
+                    found = await self.client.get_messages(peer, ids=chunk)
+                    for mid, msg in zip(chunk, found):
+                        if msg is None or getattr(msg, "action", None) is not None:
+                            gone.append(mid)
+            except FloodWaitError as exc:
+                wait_seconds = int(getattr(exc, "seconds", 60)) + 5
+                self._group_flood_until[group_id] = now_ts() + wait_seconds
+                log.warning("FloodWait اکانت هنگام بررسی پیام‌های پاک‌شده‌ی %s: %s ثانیه", peer, wait_seconds)
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("بررسی پیام‌های پاک‌شده‌ی %s نشد: %s", peer, exc)
+                continue
+            self._exists_checked[source_id] = now_ts()
+            if gone:
+                removed = self.db.forget_deleted_messages(source_id, gone)
+                log.info(
+                    "%s پیام امروزِ %s در کانال پاک شده بود؛ دیگر تکرار نمی‌شود (%s ردیف حافظه/صف پاک شد).",
+                    len(gone),
+                    peer,
+                    removed,
+                )
 
     async def scheduled_starts_loop(self) -> None:
         while not self.stop_event.is_set():
